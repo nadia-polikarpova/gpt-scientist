@@ -1,5 +1,8 @@
 # gpt_scientist
 
+[![PyPI version](https://badge.fury.io/py/gpt-scientist.svg)](https://badge.fury.io/py/gpt-scientist)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+
 `gpt_scientist` is a lightweight Python library for processing tabular data stored in Google Sheets (or CSV files) using [OpenAI](https://openai.com/) models (like GPT-4o, GPT-4o-mini, etc).
 
 The library is designed primarily for social science researchers, human rights analysts, and anyone who wants to run AI-based textual analysis over tabular data with just a few lines of Python code.
@@ -49,7 +52,7 @@ This will:
  
 > *Important:*
 > Google Sheets can *only* be accessed from Google Colab, so you need to run this code in a Colab notebook.
-> To use the library locally with CSV files, call `sc.analyze_csv(...)` instead of `sc.analyze_google_sheet(..)`.
+> To use the library locally with CSV files, call `sc.analyze_csv(...)` instead of `sc.analyze_google_sheet(..)` (see [example](https://github.com/nadia-polikarpova/gpt-scientist/blob/main/examples/review_sentiment/example.py)).
 
 **Notes**
 - The library will write to the sheet as it goes, so even if you stop the execution, you will have the results for the rows that were already processed.
@@ -140,15 +143,6 @@ sc.set_top_p(0.5)
 - Higher values (e.g., 1.0) make them more varied (and possibly less coherent).
 
 The default is 0.3, balancing predictability and creativity.
-
-**Disable structured outputs**
-
-```python
-sc.set_use_structured_outputs(False)
-```
-
-Structured outputs (enabled by default) ensure consistent formatting of results.
-*If you have many output fields and the model sometimes freezes, disabling structured outputs can help.*
 
 **Adjust retries and batch sizes**
 
