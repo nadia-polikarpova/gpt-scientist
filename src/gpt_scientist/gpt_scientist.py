@@ -51,7 +51,7 @@ class Scientist:
             load_dotenv()
             self._client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.model = 'gpt-4o-mini' # Default model
-        self.use_structured_outputs = True # Use structured outputs by default
+        self.use_structured_outputs = False # Do not use structured outputs by default (this freezes with complex outputs)
         self.system_prompt = 'You are a social scientist analyzing textual data.' # Default system prompt
         self.num_results = 1 # How many completions to generate at once? The first valid completion will be used.
         self.num_reties = 10 # How many times to retry the request if no valid completion is generated?
@@ -547,13 +547,41 @@ class Scientist:
 
             data.loc[row, self._verified_field_name(output_field)] = verified
 
+    def check_citations_csv(self,
+                            path: str,
+                            output_field: str,
+                            input_fields: list[str] = [],
+                            rows: Iterable[int] | None = None,
+                            in_place: bool = True):
+        '''
+            The same as check_citations, but for a CSV file.
+            If in_place is True, save the results to the input file, otherwise create a unique output file.
+        '''
+        # Create a unique output file name based on current time;
+        # when in_place is True, this file only serves as a backup, in case the finally block fails to run
+        out_file_name = os.path.splitext(path)[0] + f'_verified_{pd.Timestamp.now().strftime("%Y%m%d%H%M%S")}.csv'
+
+        data = pd.read_csv(path)
+        if rows is None:
+            rows = range(len(data))
+
+        # Perform citation checks
+        self.check_citations(data, output_field, input_fields, rows)
+
+        # Save the results
+        if in_place:
+            data.to_csv(path, index=False)
+        else:
+            data.to_csv(out_file_name, index=False)
+
+
     def check_citations_google_sheet(self,
                                       sheet_key: str,
                                       output_field: str,
                                       input_fields: list[str] = [],
                                       rows: str = ':',
                                       worksheet_index: int = 0):
-        '''The same as check_citiations, but for a Google Sheet.'''
+        '''The same as check_citations, but for a Google Sheet.'''
         # Open the spreadsheet and the worksheet, and read the data
         worksheet, data = self._read_spreadsheet(sheet_key, worksheet_index, input_fields, rows)
         if data is None:
