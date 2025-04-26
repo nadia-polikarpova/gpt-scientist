@@ -5,10 +5,18 @@
 
 `gpt_scientist` is a lightweight Python library for processing tabular data stored in Google Sheets (or CSV files) using [OpenAI](https://openai.com/) models (like GPT-4o, GPT-4o-mini, etc).
 
-The library is designed primarily for social science researchers, human rights analysts, and anyone who wants to run AI-based textual analysis over tabular data with just a few lines of Python code.
+The library is designed primarily for **social science researchers** and other users without extensive programming experience who wants to run AI-based textual analysis over tabular data with just a few lines of Python code.
 
 The library is best used in [Google Colab](https://colab.research.google.com/) for processing Google Sheets.
 However, it can also be used locally with CSV files.
+
+**Feedback and Collaboration**
+
+If you use `gpt_scientist` for your project, we would love to hear about it!  
+Your feedback helps us improve the library and better support real-world research and activist work.
+
+Feel free to open an [issue](https://github.com/nadia-polikarpova/gpt-scientist/issues) on GitHub, or reach out by [email](mailto:npolikarpova@ucsd.edu).
+
 
 ## Installation
 
