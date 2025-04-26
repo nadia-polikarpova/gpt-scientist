@@ -131,8 +131,6 @@ sc.set_model('gpt-4o')
 sc.load_system_prompt_from_file('content/system.txt')
 ```
 
-This will load the system prompt from file instead of a Google Doc (or setting it inline):
-
 **Limit the maximum length of model responses**
 
 ```python
@@ -141,7 +139,7 @@ sc.set_max_tokens(100)
 
 This protects you from excessive costs if the model starts generating very long outputs.
 However, if you need longer answers, setting this too low may cut them off.
-(The default is 2048, which is usually sufficient.)
+By default, the response length is unlimited.
 
 **Control response diversity**
 
@@ -164,8 +162,6 @@ sc.set_num_retries(20)
 - `set_num_retries` controls how many times the library retries after a bad response (default: 10).
 - `set_num_results` controls how many completions are requested at once — useful if input size is much bigger than output size, and the reponses are often bad.
 
-(If you're using structured outputs, you usually don't need to adjust these.)
-
 **Customize token pricing**
 
 ```python
@@ -174,3 +170,6 @@ sc.set_pricing({'gpt-3.5-turbo': {'input': 1.5, 'output': 2}})
 
 If you are using a model not included in the built-in pricing table, or if token prices have changed, you can define your own (in dollars per million tokens)
 
+## Acknowledgements
+
+This library has been created as a result of my collaboration with the [Hannah Arendt Research Center](https://www.tharesearch.center/en), and the idea is due to the Center's founder, Mariia Vasilevskaia.
