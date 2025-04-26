@@ -25,12 +25,14 @@ from gpt_scientist import Scientist
 sc = Scientist(api_key='YOUR_OPENAI_API_KEY')
 # (or set it via the OPENAI_API_KEY environment variable)
 
-# Load a system prompt from a Google Doc
-sc.load_system_prompt_from_google_doc('your-google-doc-id')
-# or define it inline using sc.set_system_prompt('Your system prompt here')
+# Set the system prompt that describes the general capabilities you need:
+sc.set_system_prompt("You are an assistant helping to analyze customer reviews.")
+# Or, if the system prompt is long (e.g. contains the theoretical frame of your research study), you can load it from a google doc:
+# sc.load_system_prompt_from_google_doc('your-google-doc-id')
+
 
 # Define the task prompt
-prompt = "Analyze this customer review and return a sentiment score (positive/neutral/negative) and a short explanation.\n\nReview:"
+prompt = "Analyze the review and provide the overall sentiment from 1 (very negative) to 5 (very positive), together with a short explanation."
 
 # Analyze a Google Sheet
 sc.analyze_google_sheet(
