@@ -3,6 +3,8 @@
 [![PyPI version](https://badge.fury.io/py/gpt-scientist.svg)](https://badge.fury.io/py/gpt-scientist)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
+🔵 [Читать на русском (Read in Russian)](README_ru.md)
+
 `gpt_scientist` is a lightweight Python library for processing tabular data stored in Google Sheets (or CSV files) using [OpenAI](https://openai.com/) models (like GPT-4o, GPT-4o-mini, etc).
 
 The library is designed primarily for **social science researchers** and other users without extensive programming experience who wants to run AI-based textual analysis over tabular data with just a few lines of Python code.
@@ -12,7 +14,7 @@ However, it can also be used locally with CSV files.
 
 **Feedback and Collaboration**
 
-If you use `gpt_scientist` for your project, we would love to hear about it!  
+If you use `gpt_scientist` for your project, we would love to hear about it!
 Your feedback helps us improve the library and better support real-world research and activist work.
 
 Feel free to open an [issue](https://github.com/nadia-polikarpova/gpt-scientist/issues) on GitHub, or reach out by [email](mailto:npolikarpova@ucsd.edu).
@@ -59,7 +61,7 @@ This will:
   - Read the content of the `review_text` column
   - Call the OpenAI model with the prompt and the review text
   - Write the results (sentiment and explanation) back into the sheet
- 
+
 > *Important:*
 > Google Sheets can *only* be accessed from Google Colab, so you need to run this code in a Colab notebook.
 > To use the library locally with CSV files, call `sc.analyze_csv(...)` instead of `sc.analyze_google_sheet(..)` (see [example](https://github.com/nadia-polikarpova/gpt-scientist/blob/main/examples/review_sentiment/example.py)).
@@ -112,12 +114,12 @@ If you don't want to modify the input sheet, add `in_place=False` to the paramet
 
 **Select a different worksheet**
 
-If your input data is not on the first sheet, add `worksheet_index=n` (e.g. `worksheet_index=1`) to the parameters of your `analyze_google_sheet`. 
+If your input data is not on the first sheet, add `worksheet_index=n` (e.g. `worksheet_index=1`) to the parameters of your `analyze_google_sheet`.
 Indexing starts from 0, so 1 is the second sheet.
 
 **Change the model**
 
-The default model is `gpt-4o-mini`: it is cheap and good enough for most tasks. 
+The default model is `gpt-4o-mini`: it is cheap and good enough for most tasks.
 But you can use any [model](https://platform.openai.com/docs/models) that is enabled for your OpenAI API key.
 Just make this call before your call to `analyze_google_sheet`:
 
