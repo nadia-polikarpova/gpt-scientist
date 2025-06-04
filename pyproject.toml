@@ -24,7 +24,11 @@ dependencies = [
 
 [project.urls]
 
-homepage = "https://github.com/hannah-arendt/gpt-scientist"
+homepage = "https://github.com/nadia-polikarpova/gpt-scientist"
 
 [tool.setuptools]
 package-dir = {"" = "src"}
+packages = ["gpt_scientist"]
+
+[tool.setuptools.package-data]
+gpt_scientist = ["model_pricing.json"]

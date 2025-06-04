@@ -8,6 +8,8 @@ from dotenv import load_dotenv
 import json
 import tiktoken
 import logging
+import requests
+import importlib.resources
 from pydantic import create_model
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from gpt_scientist.google_doc_parser import convert_to_text, convert_to_markdown
@@ -26,13 +28,8 @@ try:
 except ImportError:
     IN_COLAB = False
 
-# Princing for SOTA models in USD per 1M tokens at the time of writing
-DEFAULT_PRICING = {
-    'gpt-4o': {'input': 5, 'output': 15},
-    'gpt-4o-2024-08-06': {'input': 2.5, 'output': 10},
-    'gpt-4o-mini': {'input': 0.15, 'output': 0.6},
-}
-
+# Github URL for the default pricing table
+PRICING_URL = "https://raw.githubusercontent.com/nadia-polikarpova/gpt-scientist/main/src/gpt_scientist/model_pricing.json"
 # Index of the first non-header row in google-sheet indexing
 GSHEET_FIRST_ROW = 2
 # Regular expression pattern for Google doc URL
@@ -58,10 +55,10 @@ class Scientist:
         self.max_tokens = None # Maximum number of tokens to generate
         self.top_p = 0.3 # Top p parameter for nucleus sampling (this value is quite low, preferring more deterministic completions)
         self.output_sheet = 'gpt_output' # Name (prefix) of the worksheet to save the output in Google Sheets
-        self.pricing = DEFAULT_PRICING # Pricing for different models
         self.max_fuzzy_distance = 30 # Maximum distance for fuzzy search
         self.logger = logging.getLogger(__name__)
         self.logger.setLevel(logging.INFO)
+        self._fetch_pricing() # Fetch the pricing table from GitHub or use the local file
 
     def set_model(self, model: str):
         '''Set the model to use for the GPT Scientist.'''
@@ -114,6 +111,25 @@ class Scientist:
     def set_output_sheet(self, output_sheet: str):
         '''Set the name (prefix) of the worksheet to save the output in Google Sheets.'''
         self.output_sheet = output_sheet
+
+    def _fetch_pricing(self):
+        try:
+            # Try to fetch the pricing table from github
+            resp = requests.get(PRICING_URL, timeout=2)
+            if resp.ok:
+                self.pricing = resp.json()
+                self.logger.info(f"Fetched pricing table from {PRICING_URL}")
+                return
+        except requests.RequestException:
+            pass
+        # Otherwise: read the pricing table from the local file
+        try:
+            with importlib.resources.files("gpt_scientist").joinpath("model_pricing.json").open("r") as f:
+                self.pricing = json.load(f)
+                self.logger.info("Loaded pricing table from the local file.")
+        except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
+            self.logger.warning(f"Could not load the pricing table: {e}.")
+            self.pricing = {}
 
     def set_pricing(self, pricing: dict):
         '''
@@ -253,6 +269,7 @@ class Scientist:
             `row_index_offset` is only used for progress reporting,
             to account for the fact that the user might see a non-zero based row indexing.
         '''
+
         # Check if all input fields are present in the dataframe
         for field in input_fields:
             if field not in data.columns:
@@ -272,7 +289,12 @@ class Scientist:
                 data[field] = data[field].fillna('').astype(str)
 
         self._input_tokens, self._output_tokens = 0, 0
-        self._tokenizer = tiktoken.encoding_for_model(self.model)
+        try:
+            self._tokenizer = tiktoken.encoding_for_model(self.model)
+        except KeyError:
+            # fallback for new or unknown models
+            self.logger.warning(f"Not sure how to compute the token count for {self.model}. Using default tokenizer; cost might not be accurate.")
+            self._tokenizer = tiktoken.get_encoding("cl100k_base")
         if self.model not in self.pricing:
             self.logger.warning(f"No pricing available for {self.model}; cost will be reported as 0.")
 
@@ -337,8 +359,8 @@ class Scientist:
             rows = range(len(data))
         try:
             self.analyze_data(data, prompt, input_fields, output_fields, write_output_row, rows, examples, overwrite)
-        except Exception as _:
-            pass
+        except Exception as e:
+            raise RuntimeError(f"Error analyzing CSV: {e}")
         finally:
             if in_place and os.path.exists(out_file_name):
                 data.to_csv(path, index=False)
