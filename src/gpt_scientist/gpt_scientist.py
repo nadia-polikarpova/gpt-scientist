@@ -15,7 +15,7 @@ from pydantic import create_model
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from gpt_scientist.google_doc_parser import convert_to_text, convert_to_markdown
 from gpt_scientist.citation_checker import extract_citations, fuzzy_find_in_text
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Awaitable, TypeVar
 
 # Check if we are in Google Colab, and if so authenticate and import libraries to work with Google Sheets
 try:
@@ -447,7 +447,7 @@ class Scientist:
         if rows is None:
             rows = range(len(data))
         try:
-            asyncio.run(self.analyze_data(data, prompt, input_fields, output_fields, write_output_row, rows, examples, overwrite))
+            _run_async(self.analyze_data(data, prompt, input_fields, output_fields, write_output_row, rows, examples, overwrite))
         except Exception as e:
             raise RuntimeError(f"Error analyzing CSV: {e}")
         finally:
@@ -610,7 +610,7 @@ class Scientist:
                 col_index = output_column_indices[idx]
                 worksheet.update_cell(i + GSHEET_FIRST_ROW, col_index, self._convert_value_for_gsheet(data.at[i, field]))
 
-        asyncio.run(self.analyze_data(data,
+        _run_async(self.analyze_data(data,
                                       prompt,
                                       input_fields,
                                       output_fields,
@@ -717,3 +717,17 @@ class Scientist:
         verified_column = [self._convert_value_for_gsheet(val) for val in data[verified_column].tolist()]
         verified_column_range = rowcol_to_a1(GSHEET_FIRST_ROW, verified_column_index) + ':' + rowcol_to_a1(GSHEET_FIRST_ROW + len(data) - 1, verified_column_index)
         worksheet.update([verified_column], verified_column_range, major_dimension='COLUMNS')
+
+T = TypeVar("T")
+
+def _run_async(coro: Awaitable[T]) -> T:
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        # No loop is running, safe to use asyncio.run
+        return asyncio.run(coro)
+
+    # A loop is already running (e.g., notebook)
+    import nest_asyncio
+    nest_asyncio.apply()
+    return loop.run_until_complete(coro)
