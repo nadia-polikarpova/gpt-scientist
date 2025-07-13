@@ -3,7 +3,8 @@
 import os
 import re
 import pandas as pd
-from openai import OpenAI
+import asyncio
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 import json
 import tiktoken
@@ -35,6 +36,35 @@ GSHEET_FIRST_ROW = 2
 # Regular expression pattern for Google doc URL
 GOOGLE_DOC_URL_PATTERN = re.compile(r'https://docs.google.com/document/d/(?P<doc_id>[^/]+)/.*')
 
+class JobStats:
+    '''Statistics for a table processing job.'''
+
+    def __init__(self, pricing: dict, logger: logging.Logger):
+        '''Initialize JobStats with optional pricing information.'''
+        self.logger = logger
+        self.pricing = pricing
+        self.rows_processed = 0
+        self.input_tokens = 0
+        self.output_tokens = 0
+
+    def current_cost(self) -> dict:
+        '''Return the cost corresponding to the current number of input and output tokens.'''
+        input_cost = self.pricing['input'] * self.input_tokens / 1e6
+        output_cost = self.pricing['output'] * self.output_tokens / 1e6
+        return {'input': input_cost, 'output': output_cost}
+
+    def report_cost(self):
+        cost = self.current_cost()
+        self.logger.info(f"PROCESSED {self.rows_processed} ROWS. TOTAL_COST: ${cost['input']:.4f} + ${cost['output']:.4f} = ${cost['input'] + cost['output']:.4f}")
+
+    def log_row(self, input_tokens: int, output_tokens: int):
+        '''Add the tokens used in the current row to the total and log the cost.'''
+        self.rows_processed += 1
+        self.input_tokens += input_tokens
+        self.output_tokens += output_tokens
+        if self.rows_processed % 10 == 0:
+            self.report_cost()
+
 class Scientist:
     '''Configuration class for the GPT Scientist.'''
     def __init__(self, api_key: str = None):
@@ -43,10 +73,10 @@ class Scientist:
             If no API key is provided, the key is read from the .env file.
         '''
         if api_key:
-            self._client = OpenAI(api_key=api_key)
+            self._client = AsyncOpenAI(api_key=api_key)
         else:
             load_dotenv()
-            self._client = OpenAI(api_key=os.getenv('OPENAI_API_KEY'))
+            self._client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
         self.model = 'gpt-4o-mini' # Default model
         self.use_structured_outputs = False # Do not use structured outputs by default (this freezes with complex outputs)
         self.system_prompt = 'You are a social scientist analyzing textual data.' # Default system prompt
@@ -54,6 +84,7 @@ class Scientist:
         self.num_reties = 10 # How many times to retry the request if no valid completion is generated?
         self.max_tokens = None # Maximum number of tokens to generate
         self.top_p = 0.3 # Top p parameter for nucleus sampling (this value is quite low, preferring more deterministic completions)
+        self.parallel_rows = 100 # How many rows to process in parallel? This is the number of concurrent requests to the model.
         self.output_sheet = 'gpt_output' # Name (prefix) of the worksheet to save the output in Google Sheets
         self.max_fuzzy_distance = 30 # Maximum distance for fuzzy search
         self.logger = logging.getLogger(__name__)
@@ -108,6 +139,10 @@ class Scientist:
         '''Set the top p parameter for nucleus sampling.'''
         self.top_p = top_p
 
+    def set_parallel_rows(self, parallel_rows: int):
+        '''Set the number of rows to process in parallel.'''
+        self.parallel_rows = parallel_rows
+
     def set_output_sheet(self, output_sheet: str):
         '''Set the name (prefix) of the worksheet to save the output in Google Sheets.'''
         self.output_sheet = output_sheet
@@ -143,13 +178,6 @@ class Scientist:
         '''Set the maximum distance for fuzzy search.'''
         self.max_fuzzy_distance = max_fuzzy_distance
 
-    def current_cost(self) -> dict:
-        '''Return the cost corresponding to the current number of input and output tokens.'''
-        price = self.pricing.get(self.model, {'input': 0, 'output': 0})
-        input_cost = price['input'] * self._input_tokens / 1e6
-        output_cost = price['output'] * self._output_tokens / 1e6
-        return {'input': input_cost, 'output': output_cost}
-
     def _format_suffix(self, fields: list[str]) -> str:
         '''Suffix added to the prompt to explain the expected format of the response.'''
         return f"Your response must be a json object with the following fields: {', '.join(fields)}. The response must start with {{, not with ```json."
@@ -161,7 +189,7 @@ class Scientist:
             prompt = f"{prompt}\n{self._format_suffix(output_fields)}"
         return prompt
 
-    def _prompt_model(self, prompt: str, output_fields: list[str]) -> dict:
+    async def _prompt_model(self, prompt: str, output_fields: list[str]) -> dict:
         '''Send the prompt to the model and return the completions.'''
         if not self.use_structured_outputs:
             fn = self._client.chat.completions.create
@@ -170,11 +198,9 @@ class Scientist:
             fn = self._client.beta.chat.completions.parse
             response_format = create_model("Response", **{field: (str, ...) for field in output_fields})
 
-        # Add input tokens to the total
-        self._input_tokens += len(self._tokenizer.encode(prompt))
         messages = [{"role": "system", "content": self.system_prompt}] + self._examples + [{"role": "user", "content": prompt}]
 
-        return fn(
+        return await fn(
                 model=self.model,
                 messages=messages,
                 n=self.num_results,
@@ -193,7 +219,8 @@ class Scientist:
                 if missing_fields:
                     self.logger.warning(f"Response is missing fields {missing_fields}: {response}")
                     return None
-                return response
+                # If there are extra fields, we just ignore them
+                return {field: response[field] for field in output_fields if field in response}
             except json.JSONDecodeError as _:
                 self.logger.warning(f"Not a valid JSON: {completion}")
                 return None
@@ -203,37 +230,37 @@ class Scientist:
                 return None
             return completion.parsed.dict()
 
-    def get_response(self, prompt: str, output_fields: list[str] = []) -> dict:
+    async def get_response(self, prompt: str, output_fields: list[str] = []) -> tuple[dict, int, int]:
         '''
             Prompt the model until we get a valid json completion that contains all the output fields.
             Return None if no valid completion is generated after scientist.num_reties attempts.
         '''
+        req_input_tokens = len(self._tokenizer.encode(prompt))
+        req_output_tokens = 0
+
         for attempt in range(self.num_reties):
             if attempt > 0:
                 self.logger.warning(f"Attempt {attempt + 1}")
 
             try:
-                completions = self._prompt_model(prompt, output_fields)
+                completions = await self._prompt_model(prompt, output_fields)
 
-                # Add the content of all completions to the total output tokens
-                self._output_tokens += sum([len(self._tokenizer.encode(completions.choices[i].message.content)) for i in range(self.num_results)])
+                req_output_tokens += sum([len(self._tokenizer.encode(completions.choices[i].message.content)) for i in range(self.num_results)])
 
                 for i in range(self.num_results):
                     response = self._parse_response(completions.choices[i].message, output_fields)
                     if response is None:
                         continue
                     self.logger.debug(f"Response:\n{response}")
-                    return response
+                    return response, req_input_tokens, req_output_tokens
             except Exception as e:
                 self.logger.warning(f"Could not get a response from the model: {e}")
+
+        return None, req_input_tokens, req_output_tokens
 
     def _input_fields_and_values(self, fields: list[str], row: pd.Series) -> str:
         '''Format the input fields and values for the prompt.'''
         return '\n\n'.join([f"{field}:\n```\n{row[field]}\n```" for field in fields])
-
-    def _report_cost(self, input_tokens: int, output_tokens: int):
-        cost = self.current_cost()
-        self.logger.info(f"\tTotal cost so far: ${cost['input']:.4f} + ${cost['output']:.4f} = ${cost['input'] + cost['output']:.4f}    This row tokens: {input_tokens} + {output_tokens} ")
 
     def _add_example(self, prompt: str, row: pd.Series, input_fields: list[str], output_fields: list[str]):
         '''
@@ -247,7 +274,53 @@ class Scientist:
         self._examples.append({"role": "user", "content": full_prompt})
         self._examples.append({"role": "assistant", "content": json.dumps(response, ensure_ascii=False)})
 
-    def analyze_data(self,
+    async def _writer(self,
+                      queue: asyncio.Queue,
+                      write_output_row: Callable[[pd.DataFrame, int], None],
+                      data: pd.DataFrame,
+                      job_stats: JobStats = None,
+                      row_index_offset: int = 0):
+        '''
+            Worker that writes the output rows to the dataframe and calls write_output_row after each row.
+        '''
+        while True:
+            i, response, input_tokens, output_tokens = await queue.get()
+            # self.logger.info(f"WRITER got row {i}. Output queue size: {queue.qsize()}")
+            if i is None:  # sentinel
+                break
+            if response is None:
+                self.logger.error(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
+            else:
+                for field in response:
+                    data.at[i, field] = response[field]
+            await asyncio.to_thread(write_output_row, data, i)
+            if job_stats:
+                job_stats.log_row(input_tokens, output_tokens)
+            queue.task_done()
+
+    async def _analyze_row_worker(self,
+                                  data: pd.DataFrame,
+                                  prompt: str,
+                                  input_fields: list[str],
+                                  output_fields: list[str],
+                                  row_queue: asyncio.Queue,
+                                  output_queue: asyncio.Queue,
+                                  row_index_offset: int = 0):
+        '''
+            Worker that processes a single row from the dataframe, sends it to the model, and puts the response in the output queue.
+        '''
+        while True:
+            i = await row_queue.get()
+            if i is None:
+                break
+            self.logger.info(f"Processing row {i + row_index_offset}")
+            row = data.loc[i]
+            full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
+            response, input_tokens, output_tokens = await self.get_response(full_prompt, output_fields)
+            await output_queue.put((i, response, input_tokens, output_tokens))
+            row_queue.task_done()
+
+    async def analyze_data(self,
                      data: pd.DataFrame,
                      prompt: str,
                      input_fields: list[str],
@@ -268,6 +341,8 @@ class Scientist:
             if `overwrite` is false, rows where any of the `output_fields` is non-empty will be skipped;
             `row_index_offset` is only used for progress reporting,
             to account for the fact that the user might see a non-zero based row indexing.
+            This function is asynchronous and uses `self.parallel_rows` workers to process this many rows in parallel,
+            and a single writer to write the output rows.
         '''
 
         # Check if all input fields are present in the dataframe
@@ -275,10 +350,11 @@ class Scientist:
             if field not in data.columns:
                 self.logger.error(f"Input field {field} not found.")
                 return
-        # If no input fields are specifies, use all columns except the output fields
+        # If no input fields are specified, use all columns except the output fields
         if not input_fields:
             input_fields = [field for field in data.columns if field not in output_fields]
 
+        # Create missing output fields
         for field in output_fields:
             if field not in data.columns:
                 # If the output field is not in the dataframe, add it
@@ -288,7 +364,7 @@ class Scientist:
                 # TODO: in the future, we may want to specify the type of the output fields
                 data[field] = data[field].fillna('').astype(str)
 
-        self._input_tokens, self._output_tokens = 0, 0
+        # Create a tokenizer for the model
         try:
             self._tokenizer = tiktoken.encoding_for_model(self.model)
         except KeyError:
@@ -308,30 +384,41 @@ class Scientist:
             self.logger.info(f"Adding example row {i + row_index_offset}")
             self._add_example(prompt, row, input_fields, output_fields)
 
-        # Process every row in the given range
+        # Create a task queue
+        # TODO: We might want to limit the parallelism by the number of rows to process
+        # but it's kinda annoying to count how many rows we actually have.
+        row_queue = asyncio.Queue(2 * self.parallel_rows)  # Double the size to avoid blocking
+        output_queue = asyncio.Queue()
+
+        # Start workers
+        for _ in range(self.parallel_rows):
+            asyncio.create_task(self._analyze_row_worker(data, prompt, input_fields, output_fields, row_queue, output_queue, row_index_offset))
+
+        # Start writer
+        stats = JobStats(self.pricing.get(self.model, {'input': 0, 'output': 0}), self.logger)
+        writer_task = asyncio.create_task(self._writer(output_queue, write_output_row, data, stats, row_index_offset))
+
+        # Add rows to be processed by the workers
         for i in rows:
             if i < 0 or i >= len(data):
                 self.logger.error(f"Skipping row {i + row_index_offset} (no such row)")
                 continue
-
             row = data.loc[i]
-
             if not overwrite and any(row[field] for field in output_fields):
                 # If any of the output fields is already filled, skip the row
                 self.logger.info(f"Skipping row {i + row_index_offset} (already filled)")
                 continue
+            await row_queue.put(i)
 
-            self.logger.info(f"Processing row {i + row_index_offset}")
-            old_input_tokens, old_output_tokens = self._input_tokens, self._output_tokens
-            full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
-            response = self.get_response(full_prompt, output_fields)
-            if response is None:
-                self.logger.error(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
-            else:
-                for field in output_fields:
-                    data.at[i, field] = response[field]
-            write_output_row(data, i)
-            self._report_cost(self._input_tokens - old_input_tokens, self._output_tokens - old_output_tokens)
+        # Wait for input processing to finish
+        await row_queue.join()
+
+        # Tell workers and writer to shut down
+        for _ in range(self.parallel_rows):
+            await row_queue.put(None)
+        await output_queue.put((None, None, None, None))
+        await writer_task
+        stats.report_cost()
 
     def analyze_csv(self,
                     path: str,
@@ -352,13 +439,15 @@ class Scientist:
 
         def write_output_row(data, i):
             # Append the row to the output file
-            data.loc[[i]].to_csv(out_file_name, mode='a', header=(i == 0), index=False)
+            data.loc[[i]].to_csv(out_file_name, mode='a', header=False, index=True)
 
-        data = pd.read_csv(path)
+        data = pd.read_csv(path, dtype=str, na_filter=False)
+        # Write headers once at the top
+        data.iloc[[]].to_csv(out_file_name, mode='w', index=True)
         if rows is None:
             rows = range(len(data))
         try:
-            self.analyze_data(data, prompt, input_fields, output_fields, write_output_row, rows, examples, overwrite)
+            asyncio.run(self.analyze_data(data, prompt, input_fields, output_fields, write_output_row, rows, examples, overwrite))
         except Exception as e:
             raise RuntimeError(f"Error analyzing CSV: {e}")
         finally:
@@ -521,15 +610,15 @@ class Scientist:
                 col_index = output_column_indices[idx]
                 worksheet.update_cell(i + GSHEET_FIRST_ROW, col_index, self._convert_value_for_gsheet(data.at[i, field]))
 
-        self.analyze_data(data,
-                          prompt,
-                          input_fields,
-                          output_fields,
-                          write_output_row,
-                          input_range,
-                          example_range,
-                          overwrite,
-                          row_index_offset=GSHEET_FIRST_ROW)
+        asyncio.run(self.analyze_data(data,
+                                      prompt,
+                                      input_fields,
+                                      output_fields,
+                                      write_output_row,
+                                      input_range,
+                                      example_range,
+                                      overwrite,
+                                      row_index_offset=GSHEET_FIRST_ROW))
 
     def _verified_field_name(self, output_field: str) -> str:
         return f'{output_field}_verified'
