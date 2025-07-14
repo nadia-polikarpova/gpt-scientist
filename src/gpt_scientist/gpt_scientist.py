@@ -57,9 +57,9 @@ class JobStats:
         cost = self.current_cost()
         self.logger.info(f"PROCESSED {self.rows_processed} ROWS. TOTAL_COST: ${cost['input']:.4f} + ${cost['output']:.4f} = ${cost['input'] + cost['output']:.4f}")
 
-    def log_row(self, input_tokens: int, output_tokens: int):
+    def log_rows(self, rows: int, input_tokens: int, output_tokens: int):
         '''Add the tokens used in the current row to the total and log the cost.'''
-        self.rows_processed += 1
+        self.rows_processed += rows
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
         if self.rows_processed % 10 == 0:
@@ -276,27 +276,60 @@ class Scientist:
 
     async def _writer(self,
                       queue: asyncio.Queue,
-                      write_output_row: Callable[[pd.DataFrame, int], None],
+                      write_output_rows: Callable[[pd.DataFrame, list[int]], None],
                       data: pd.DataFrame,
                       job_stats: JobStats = None,
                       row_index_offset: int = 0):
         '''
-            Worker that writes the output rows to the dataframe and calls write_output_row after each row.
+            Worker that writes all outputs currently available in the queue to the dataframe and calls `write_output_rows` to save the progress.
         '''
         while True:
-            i, response, input_tokens, output_tokens = await queue.get()
-            # self.logger.info(f"WRITER got row {i}. Output queue size: {queue.qsize()}")
-            if i is None:  # sentinel
-                break
-            if response is None:
-                self.logger.error(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
+            batch = []
+            # Wait until there's something in the queue
+            first_row, response, input_tokens, output_tokens = await queue.get()
+            batch.append((first_row, response))
+            self.logger.info(f"WRITER triggered on row {first_row}. Output queue size: {queue.qsize()}")
+
+            # Drain the rest of the queue and save all responses in a batch;
+            # this is done because writing to google sheets one row at a time is slow.
+            while not queue.empty():
+                i, response, row_input_tokens, row_output_tokens = await queue.get_nowait()
+                batch.append((i, response))
+                input_tokens += row_input_tokens
+                output_tokens += row_output_tokens
+
+            # Update the dataframe with the responses
+            indices_to_write = []
+            for i, response in batch:
+                if i is None:  # sentinel
+                    break
+                if response is None:
+                    self.logger.error(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
+                else:
+                    indices_to_write.append(i)
+                    for field in response:
+                        data.at[i, field] = response[field]
+
+            # Write valid rows persistent storage
+            if not indices_to_write:
+                self.logger.warning("No valid rows to write in this batch.")
             else:
-                for field in response:
-                    data.at[i, field] = response[field]
-            await asyncio.to_thread(write_output_row, data, i)
+                indices_to_write.sort()  # Sort indices to avoid unneeded reordering
+                await asyncio.to_thread(write_output_rows, data, indices_to_write)
+
+            # Log the number of rows processed in this batch
             if job_stats:
-                job_stats.log_row(input_tokens, output_tokens)
-            queue.task_done()
+                # We count unsuccessful rows as well, because they still consume tokens, but we don't count the sentinel row
+                rows_processed = len([i for i, _ in batch if i is not None])
+                job_stats.log_rows(rows_processed, input_tokens, output_tokens)
+
+            # Mark all dequeued items as done
+            for _ in batch:
+                queue.task_done()
+
+            # If last row was a sentinel, we are done
+            if batch[-1][0] is None:
+                break
 
     async def _analyze_row_worker(self,
                                   data: pd.DataFrame,
@@ -304,8 +337,7 @@ class Scientist:
                                   input_fields: list[str],
                                   output_fields: list[str],
                                   row_queue: asyncio.Queue,
-                                  output_queue: asyncio.Queue,
-                                  row_index_offset: int = 0):
+                                  output_queue: asyncio.Queue):
         '''
             Worker that processes a single row from the dataframe, sends it to the model, and puts the response in the output queue.
         '''
@@ -313,7 +345,6 @@ class Scientist:
             i = await row_queue.get()
             if i is None:
                 break
-            self.logger.info(f"Processing row {i + row_index_offset}")
             row = data.loc[i]
             full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
             response, input_tokens, output_tokens = await self.get_response(full_prompt, output_fields)
@@ -325,7 +356,7 @@ class Scientist:
                      prompt: str,
                      input_fields: list[str],
                      output_fields: list[str],
-                     write_output_row: Callable[[pd.DataFrame, int], None],
+                     write_output_rows: Callable[[pd.DataFrame, list[int]], None],
                      rows: Iterable[int],
                      examples: Iterable[int],
                      overwrite: bool,
@@ -392,11 +423,11 @@ class Scientist:
 
         # Start workers
         for _ in range(self.parallel_rows):
-            asyncio.create_task(self._analyze_row_worker(data, prompt, input_fields, output_fields, row_queue, output_queue, row_index_offset))
+            asyncio.create_task(self._analyze_row_worker(data, prompt, input_fields, output_fields, row_queue, output_queue))
 
         # Start writer
         stats = JobStats(self.pricing.get(self.model, {'input': 0, 'output': 0}), self.logger)
-        writer_task = asyncio.create_task(self._writer(output_queue, write_output_row, data, stats, row_index_offset))
+        writer_task = asyncio.create_task(self._writer(output_queue, write_output_rows, data, stats, row_index_offset))
 
         # Add rows to be processed by the workers
         for i in rows:
@@ -416,7 +447,7 @@ class Scientist:
         # Tell workers and writer to shut down
         for _ in range(self.parallel_rows):
             await row_queue.put(None)
-        await output_queue.put((None, None, None, None))
+        await output_queue.put((None, None, 0, 0))
         await writer_task
         stats.report_cost()
 
@@ -437,9 +468,9 @@ class Scientist:
         # when in_place is True, this file only serves as a backup, in case the finally block fails to run
         out_file_name = os.path.splitext(path)[0] + f'_output_{pd.Timestamp.now().strftime("%Y%m%d%H%M%S")}.csv'
 
-        def write_output_row(data, i):
-            # Append the row to the output file
-            data.loc[[i]].to_csv(out_file_name, mode='a', header=False, index=True)
+        def write_output_rows(data, indices):
+            # Append the rows to the output file
+            data.loc[indices].to_csv(out_file_name, mode='a', header=False, index=True)
 
         data = pd.read_csv(path, dtype=str, na_filter=False)
         # Write headers once at the top
@@ -447,7 +478,7 @@ class Scientist:
         if rows is None:
             rows = range(len(data))
         try:
-            _run_async(self.analyze_data(data, prompt, input_fields, output_fields, write_output_row, rows, examples, overwrite))
+            _run_async(self.analyze_data(data, prompt, input_fields, output_fields, write_output_rows, rows, examples, overwrite))
         except Exception as e:
             raise RuntimeError(f"Error analyzing CSV: {e}")
         finally:
@@ -599,22 +630,27 @@ class Scientist:
                 output_column_indices.append(len(header) + 1)
                 header.append(field)  # Update the header list
 
-        # Now we have the column indices, prepare the function that outputs a row
+        # Now we have the column indices, prepare the function that outputs a list of rows
         @retry(
             wait=wait_exponential(min=10, max=60),  # Exponential back-off, 10 to 60 seconds
             stop=stop_after_attempt(10),  # Max 10 retries
             retry=retry_if_exception_type(Exception)  # Retry on any exception
         )
-        def write_output_row(data, i):
-            for idx, field in enumerate(output_fields):
-                col_index = output_column_indices[idx]
-                worksheet.update_cell(i + GSHEET_FIRST_ROW, col_index, self._convert_value_for_gsheet(data.at[i, field]))
+        def write_output_rows(data, indices):
+            cells = []
+            for i in indices:
+                gsheet_row = i + GSHEET_FIRST_ROW
+                for j, field in enumerate(output_fields):
+                    gsheet_col = output_column_indices[j]
+                    value = self._convert_value_for_gsheet(data.at[i, field])
+                    cells.append(gspread.Cell(row=gsheet_row, col=gsheet_col, value=value))
+            worksheet.update_cells(cells)
 
         _run_async(self.analyze_data(data,
                                       prompt,
                                       input_fields,
                                       output_fields,
-                                      write_output_row,
+                                      write_output_rows,
                                       input_range,
                                       example_range,
                                       overwrite,
