@@ -288,12 +288,12 @@ class Scientist:
             # Wait until there's something in the queue
             first_row, response, input_tokens, output_tokens = await queue.get()
             batch.append((first_row, response))
-            self.logger.info(f"WRITER triggered on row {first_row}. Output queue size: {queue.qsize()}")
+            # self.logger.info(f"WRITER triggered on row {first_row}. Output queue size: {queue.qsize()}")
 
             # Drain the rest of the queue and save all responses in a batch;
             # this is done because writing to google sheets one row at a time is slow.
             while not queue.empty():
-                i, response, row_input_tokens, row_output_tokens = await queue.get_nowait()
+                i, response, row_input_tokens, row_output_tokens = queue.get_nowait()
                 batch.append((i, response))
                 input_tokens += row_input_tokens
                 output_tokens += row_output_tokens
@@ -311,9 +311,7 @@ class Scientist:
                         data.at[i, field] = response[field]
 
             # Write valid rows persistent storage
-            if not indices_to_write:
-                self.logger.warning("No valid rows to write in this batch.")
-            else:
+            if indices_to_write:
                 indices_to_write.sort()  # Sort indices to avoid unneeded reordering
                 await asyncio.to_thread(write_output_rows, data, indices_to_write)
 
