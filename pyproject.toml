@@ -4,9 +4,9 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpt_scientist"
-version = "0.1.18"
+version = "0.1.19"
 description = "A library for processing textual datasets with large language models."
-readme = "README.rst"
+readme = "README.md"
 authors = [
   {name = "Nadia Polikarpova", email = "nadia.polikarpova@gmail.com"}
 ]
