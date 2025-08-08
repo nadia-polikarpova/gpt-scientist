@@ -524,7 +524,6 @@ class Scientist:
 
         return (worksheet, data)
 
-
     def _parse_row_ranges(self, range_str: str, n_rows: int) -> list[int]:
         '''
             Parse a g-sheet-style row range string (e.g., "2:10,12,15:") into a list of row indexes.
