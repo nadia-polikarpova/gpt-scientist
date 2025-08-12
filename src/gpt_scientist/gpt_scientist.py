@@ -4,7 +4,7 @@ import os
 import re
 import pandas as pd
 import asyncio
-from openai import AsyncOpenAI
+from openai import NOT_GIVEN, AsyncOpenAI, NotGiven
 from dotenv import load_dotenv
 import json
 import tiktoken
@@ -139,6 +139,13 @@ class Scientist:
         '''Set the top p parameter for nucleus sampling.'''
         self.top_p = top_p
 
+    def get_top_p(self) -> float | NotGiven:
+        '''Get the top p parameter if supported by the current model, otherwise return None.'''
+        if self.model in self.pricing and 'top_p' in self.pricing[self.model]:
+            if not self.pricing[self.model]['top_p']:
+                return NOT_GIVEN
+        return self.top_p
+
     def set_parallel_rows(self, parallel_rows: int):
         '''Set the number of rows to process in parallel.'''
         self.parallel_rows = parallel_rows
@@ -195,7 +202,7 @@ class Scientist:
             fn = self._client.chat.completions.create
             response_format={"type": "json_object"}
         else:
-            fn = self._client.beta.chat.completions.parse
+            fn = self._client.chat.completions.parse
             response_format = create_model("Response", **{field: (str, ...) for field in output_fields})
 
         messages = [{"role": "system", "content": self.system_prompt}] + self._examples + [{"role": "user", "content": prompt}]
@@ -204,9 +211,9 @@ class Scientist:
                 model=self.model,
                 messages=messages,
                 n=self.num_results,
-                max_tokens=self.max_tokens,
+                max_completion_tokens=self.max_tokens,
                 response_format=response_format,
-                top_p=self.top_p,
+                top_p=self.get_top_p(),
             )
 
     def _parse_response(self, completion, output_fields: list[str]) -> dict:
