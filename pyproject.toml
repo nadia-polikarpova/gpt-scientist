@@ -15,8 +15,7 @@ license = {text = "MIT license"}
 dependencies = [
     "pandas",
     "python-dotenv",
-    "openai >= 1.45.0",
-    "tiktoken",
+    "openai >= 1.99.0",
     "fuzzysearch",
     "tenacity",
     "pydantic",

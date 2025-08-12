@@ -7,7 +7,6 @@ import asyncio
 from openai import NOT_GIVEN, AsyncOpenAI, NotGiven
 from dotenv import load_dotenv
 import json
-import tiktoken
 import logging
 import requests
 import importlib.resources
@@ -235,14 +234,14 @@ class Scientist:
             if completion.refusal:
                 self.logger.warning(f"Completion was refused: {completion.refusal}")
                 return None
-            return completion.parsed.dict()
+            return completion.parsed.model_dump()
 
     async def get_response(self, prompt: str, output_fields: list[str] = []) -> tuple[dict, int, int]:
         '''
             Prompt the model until we get a valid json completion that contains all the output fields.
             Return None if no valid completion is generated after scientist.num_reties attempts.
         '''
-        req_input_tokens = len(self._tokenizer.encode(prompt))
+        req_input_tokens = 0
         req_output_tokens = 0
 
         for attempt in range(self.num_reties):
@@ -252,7 +251,13 @@ class Scientist:
             try:
                 completions = await self._prompt_model(prompt, output_fields)
 
-                req_output_tokens += sum([len(self._tokenizer.encode(completions.choices[i].message.content)) for i in range(self.num_results)])
+                u = getattr(completions, "usage", None)
+                if u:
+                    req_input_tokens += u.prompt_tokens
+                    req_output_tokens += u.completion_tokens
+                else:
+                    # For older models, we might not have usage information
+                    self.logger.warning("No usage information in the response; cost will be reported as 0.")
 
                 for i in range(self.num_results):
                     response = self._parse_response(completions.choices[i].message, output_fields)
@@ -400,13 +405,6 @@ class Scientist:
                 # TODO: in the future, we may want to specify the type of the output fields
                 data[field] = data[field].fillna('').astype(str)
 
-        # Create a tokenizer for the model
-        try:
-            self._tokenizer = tiktoken.encoding_for_model(self.model)
-        except KeyError:
-            # fallback for new or unknown models
-            self.logger.warning(f"Not sure how to compute the token count for {self.model}. Using default tokenizer; cost might not be accurate.")
-            self._tokenizer = tiktoken.get_encoding("cl100k_base")
         if self.model not in self.pricing:
             self.logger.warning(f"No pricing available for {self.model}; cost will be reported as 0.")
 
