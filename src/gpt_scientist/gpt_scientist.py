@@ -186,7 +186,7 @@ class Scientist:
 
     def _format_suffix(self, fields: list[str]) -> str:
         '''Suffix added to the prompt to explain the expected format of the response.'''
-        return f"Your response must be a json object with the following fields: {', '.join(fields)}. The response must start with {{, not with ```json."
+        return f"Return exactly one json object with the following fields: {', '.join(fields)}."
 
     def _create_prompt(self, user_prompt: str, input_fields: list[str], output_fields: list[str], row: pd.Series) -> str:
         prompt = f"{user_prompt}\n{self._input_fields_and_values(input_fields, row)}"
