@@ -4,6 +4,8 @@ all:
 	python -m build
 
 upload: all
+	@set -a; \
+	. .env; \
 	twine upload dist/*
 
 clean:

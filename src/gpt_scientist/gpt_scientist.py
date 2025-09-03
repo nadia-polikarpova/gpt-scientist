@@ -13,7 +13,7 @@ import importlib.resources
 from pydantic import create_model
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from gpt_scientist.google_doc_parser import convert_to_text, convert_to_markdown
-from gpt_scientist.citation_checker import extract_citations, fuzzy_find_in_text
+from gpt_scientist.quote_checker import extract_quotes, fuzzy_find_in_text
 from typing import Callable, Iterable, Awaitable, TypeVar
 
 # Check if we are in Google Colab, and if so authenticate and import libraries to work with Google Sheets
@@ -227,8 +227,8 @@ class Scientist:
                     return None
                 # If there are extra fields, we just ignore them
                 return {field: response[field] for field in output_fields if field in response}
-            except json.JSONDecodeError as _:
-                self.logger.warning(f"Not a valid JSON: {completion}")
+            except Exception as _:
+                self.logger.warning(f"Failed to parse response: {completion}")
                 return None
         else:
             if completion.refusal:
@@ -505,7 +505,10 @@ class Scientist:
             return
         creds, _ = default()
         gc = gspread.authorize(creds)
-        spreadsheet = gc.open_by_key(key)
+        if "docs.google.com" in key:
+            spreadsheet = gc.open_by_url(key)
+        else:
+            spreadsheet = gc.open_by_key(key)
         worksheet = spreadsheet.get_worksheet(worksheet_index)
         # If in_place is False, create a copy of the worksheet
         if not in_place:
@@ -661,14 +664,14 @@ class Scientist:
     def _verified_field_name(self, output_field: str) -> str:
         return f'{output_field}_verified'
 
-    def check_citations(self,
+    def check_quotes(self,
                         data: pd.DataFrame,
                         output_field: str,
                         input_fields: list[str],
                         rows: Iterable[int]):
         '''
-            For each row in the rows range, check that the citations from the output field actually exist in one of the input fields.
-            We assume that the values in output_field are strings that contain citations in quotes,
+            For each row in the rows range, check that the quotes from the output field actually exist in one of the input fields.
+            We assume that the values in output_field are strings that contain quotes in quotes,
             and the values in all input fields are strings.
             Record the results in a new column called {output_field}_verified.
         '''
@@ -676,34 +679,34 @@ class Scientist:
             data[self._verified_field_name(output_field)] = ''
         for row in rows:
             output = data.loc[row, output_field]
-            citations = extract_citations(output)
+            quotes = extract_quotes(output)
             input_text = '\n\n'.join(data.loc[row, input_fields])
             verified = output
-            for citation in citations:
-                self.logger.info(f'Checking citation: "{citation[:50]}..."')
-                matched = fuzzy_find_in_text(citation, input_text, self.max_fuzzy_distance)
+            for quote in quotes:
+                self.logger.info(f'Checking quote: "{quote[:50]}..."')
+                matched = fuzzy_find_in_text(quote, input_text, self.max_fuzzy_distance)
 
                 if matched:
                     (res, dist) = matched
-                    verified = verified.replace(citation, res)
+                    verified = verified.replace(quote, res)
                     if dist == 0:
                       self.logger.info("Found exact match")
                     else:
                       self.logger.info(f"Found a match {dist} character(s) apart")
                 else:
-                    verified = verified.replace(citation, 'CITATION NOT FOUND')
-                    self.logger.info(f"CITATION NOT FOUND")
+                    verified = verified.replace(quote, 'QUOTE NOT FOUND')
+                    self.logger.info(f"QUOTE NOT FOUND")
 
             data.loc[row, self._verified_field_name(output_field)] = verified
 
-    def check_citations_csv(self,
+    def check_quotes_csv(self,
                             path: str,
                             output_field: str,
                             input_fields: list[str] = [],
                             rows: Iterable[int] | None = None,
                             in_place: bool = True):
         '''
-            The same as check_citations, but for a CSV file.
+            The same as check_quotes, but for a CSV file.
             If in_place is True, save the results to the input file, otherwise create a unique output file.
         '''
         # Create a unique output file name based on current time;
@@ -714,8 +717,8 @@ class Scientist:
         if rows is None:
             rows = range(len(data))
 
-        # Perform citation checks
-        self.check_citations(data, output_field, input_fields, rows)
+        # Perform quote checks
+        self.check_quotes(data, output_field, input_fields, rows)
 
         # Save the results
         if in_place:
@@ -724,13 +727,13 @@ class Scientist:
             data.to_csv(out_file_name, index=False)
 
 
-    def check_citations_google_sheet(self,
+    def check_quotes_google_sheet(self,
                                       sheet_key: str,
                                       output_field: str,
                                       input_fields: list[str] = [],
                                       rows: str = ':',
                                       worksheet_index: int = 0):
-        '''The same as check_citations, but for a Google Sheet.'''
+        '''The same as check_quotes, but for a Google Sheet.'''
         # Open the spreadsheet and the worksheet, and read the data
         worksheet, data = self._read_spreadsheet(sheet_key, worksheet_index, input_fields, rows)
         if data is None:
@@ -751,7 +754,7 @@ class Scientist:
             new_col_data = [verified_column] + [''] * (worksheet.row_count - 1)
             worksheet.insert_cols([new_col_data], verified_column_index)
 
-        self.check_citations(data, output_field, input_fields, rows)
+        self.check_quotes(data, output_field, input_fields, rows)
         verified_column = [self._convert_value_for_gsheet(val) for val in data[verified_column].tolist()]
         verified_column_range = rowcol_to_a1(GSHEET_FIRST_ROW, verified_column_index) + ':' + rowcol_to_a1(GSHEET_FIRST_ROW + len(data) - 1, verified_column_index)
         worksheet.update([verified_column], verified_column_range, major_dimension='COLUMNS')

@@ -12,7 +12,7 @@ QUOTE_PAIRS = {
     "'": "'"
 }
 
-def extract_citations(text: str) -> list[str]:
+def extract_quotes(text: str) -> list[str]:
     '''
     If text contains only properly quoted strings separated by whitespace,
     extract all substrings between the quotes. Otherwise, return the whole text.
@@ -40,19 +40,19 @@ def extract_citations(text: str) -> list[str]:
 
     return all_matches
 
-def fuzzy_find_in_text(citation: str, text: str, max_distance: int) -> str:
-    # Clean the text and citation by collapsing multiple spaces and normalizing newlines
+def fuzzy_find_in_text(quote: str, text: str, max_distance: int) -> str:
+    # Clean the text and quote by collapsing multiple spaces and normalizing newlines
     text = re.sub(r'\s+', ' ', text)
-    citation = re.sub(r'\s+', ' ', citation)
+    quote = re.sub(r'\s+', ' ', quote)
 
-    # First check if the citation is an exact match, ignoring case
+    # First check if the quote is an exact match, ignoring case
     # (because this is common and faster)
-    exact_match = re.search(re.escape(citation), text, re.IGNORECASE)
+    exact_match = re.search(re.escape(quote), text, re.IGNORECASE)
     if exact_match:
         return (exact_match.group(), 0)
 
     # Otherwise, use fuzzy search to find the closest
-    matches = find_near_matches(citation, text, max_l_dist=min(len(citation)//4, max_distance))
+    matches = find_near_matches(quote, text, max_l_dist=min(len(quote)//4, max_distance))
     if not matches:
         return None
     else:

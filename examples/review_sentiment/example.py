@@ -20,7 +20,7 @@ sc.analyze_csv('reviews.csv',
                output_fields=['sentiment', 'quote'])
 
 # Check quote accuracy
-sc.check_citations_csv('reviews.csv',
+sc.check_quotes_csv('reviews.csv',
                        input_fields=['review_text'],
                        output_field='quote')
 
