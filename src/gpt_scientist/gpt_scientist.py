@@ -14,7 +14,7 @@ from pydantic import create_model
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
 from gpt_scientist.google_doc_parser import convert_to_text, convert_to_markdown
 from gpt_scientist.quote_checker import extract_quotes, fuzzy_find_in_text
-from typing import Callable, Iterable, Awaitable, TypeVar
+from typing import Callable, Iterable, Awaitable, TypeVar, Optional
 
 # Check if we are in Google Colab, and if so authenticate and import libraries to work with Google Sheets
 try:
@@ -34,6 +34,10 @@ PRICING_URL = "https://raw.githubusercontent.com/nadia-polikarpova/gpt-scientist
 GSHEET_FIRST_ROW = 2
 # Regular expression pattern for Google doc URL
 GOOGLE_DOC_URL_PATTERN = re.compile(r'https://docs.google.com/document/d/(?P<doc_id>[^/]+)/.*')
+# Default model
+DEFAULT_MODEL = 'gpt-4o-mini'
+# Default embedding model
+DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small'
 
 class JobStats:
     '''Statistics for a table processing job.'''
@@ -48,8 +52,8 @@ class JobStats:
 
     def current_cost(self) -> dict:
         '''Return the cost corresponding to the current number of input and output tokens.'''
-        input_cost = self.pricing['input'] * self.input_tokens / 1e6
-        output_cost = self.pricing['output'] * self.output_tokens / 1e6
+        input_cost = self.pricing.get('input', 0) * self.input_tokens / 1e6
+        output_cost = self.pricing.get('output', 0) * self.output_tokens / 1e6
         return {'input': input_cost, 'output': output_cost}
 
     def report_cost(self):
@@ -76,13 +80,14 @@ class Scientist:
         else:
             load_dotenv()
             self._client = AsyncOpenAI(api_key=os.getenv('OPENAI_API_KEY'))
-        self.model = 'gpt-4o-mini' # Default model
+        self.model = DEFAULT_MODEL
         self.use_structured_outputs = False # Do not use structured outputs by default (this freezes with complex outputs)
         self.system_prompt = 'You are a social scientist analyzing textual data.' # Default system prompt
         self.num_results = 1 # How many completions to generate at once? The first valid completion will be used.
         self.num_reties = 10 # How many times to retry the request if no valid completion is generated?
         self.max_tokens = None # Maximum number of tokens to generate
         self.top_p = 0.3 # Top p parameter for nucleus sampling (this value is quite low, preferring more deterministic completions)
+        self.similarity_mode = 'max' # Similarity mode: 'max' (default) or 'mean'
         self.parallel_rows = 100 # How many rows to process in parallel? This is the number of concurrent requests to the model.
         self.output_sheet = 'gpt_output' # Name (prefix) of the worksheet to save the output in Google Sheets
         self.max_fuzzy_distance = 30 # Maximum distance for fuzzy search
@@ -133,6 +138,17 @@ class Scientist:
     def set_max_tokens(self, max_tokens: int):
         '''Set the maximum number of tokens to generate.'''
         self.max_tokens = max_tokens
+
+    def set_similarity_mode(self, similarity_mode: str):
+        '''Set the similarity mode: 'max' (default) or 'mean'.'''
+        if similarity_mode not in ['max', 'mean']:
+            self.logger.error("Invalid similarity mode. Must be 'max' or 'mean'.")
+            return
+        self.similarity_mode = similarity_mode
+
+    def is_embedding_model(self) -> bool:
+        '''Return True if the current model is an embedding model.'''
+        return self.model in self.pricing and 'embedding' in self.pricing[self.model] and self.pricing[self.model]['embedding']
 
     def set_top_p(self, top_p: float):
         '''Set the top p parameter for nucleus sampling.'''
@@ -215,7 +231,7 @@ class Scientist:
                 top_p=self.get_top_p(),
             )
 
-    def _parse_response(self, completion, output_fields: list[str]) -> dict:
+    def _parse_response(self, completion, output_fields: list[str]) -> Optional[dict]:
         '''Parse model completion into a dictionary.'''
         if not self.use_structured_outputs:
             try:
@@ -236,7 +252,7 @@ class Scientist:
                 return None
             return completion.parsed.model_dump()
 
-    async def get_response(self, prompt: str, output_fields: list[str] = []) -> tuple[dict, int, int]:
+    async def _get_response(self, prompt: str, output_fields: list[str] = []) -> tuple[dict, int, int]:
         '''
             Prompt the model until we get a valid json completion that contains all the output fields.
             Return None if no valid completion is generated after scientist.num_reties attempts.
@@ -270,6 +286,19 @@ class Scientist:
 
         return None, req_input_tokens, req_output_tokens
 
+    async def _generate_embedding(self, text: str) -> tuple[list[float], int]:
+        '''Generates an embedding for a given text.'''
+        response = await self._client.embeddings.create(
+            input=[text],
+            model=self.model
+        )
+        u = getattr(response, "usage", None)
+        if u:
+            return response.data[0].embedding, u.prompt_tokens
+        else:
+            self.logger.warning("No usage information in the embedding response; cost will be reported as 0.")
+            return response.data[0].embedding, 0
+
     def _input_fields_and_values(self, fields: list[str], row: pd.Series) -> str:
         '''Format the input fields and values for the prompt.'''
         return '\n\n'.join([f"{field}:\n```\n{row[field]}\n```" for field in fields])
@@ -290,7 +319,7 @@ class Scientist:
                       queue: asyncio.Queue,
                       write_output_rows: Callable[[pd.DataFrame, list[int]], None],
                       data: pd.DataFrame,
-                      job_stats: JobStats = None,
+                      job_stats: Optional[JobStats] = None,
                       row_index_offset: int = 0):
         '''
             Worker that writes all outputs currently available in the queue to the dataframe and calls `write_output_rows` to save the progress.
@@ -357,13 +386,79 @@ class Scientist:
                 break
             row = data.loc[i]
             full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
-            response, input_tokens, output_tokens = await self.get_response(full_prompt, output_fields)
+            response, input_tokens, output_tokens = await self._get_response(full_prompt, output_fields)
             await output_queue.put((i, response, input_tokens, output_tokens))
             row_queue.task_done()
+
+    async def _similarity_row_worker(self,
+                                      data: pd.DataFrame,
+                                      query_embeddings: list[list[float]],
+                                      input_field: str,
+                                      output_field: str,
+                                      row_queue: asyncio.Queue,
+                                      output_queue: asyncio.Queue):
+        '''
+            Worker that processes a single row from the dataframe for similarity tasks.
+        '''
+        while True:
+            i = await row_queue.get()
+            if i is None:
+                break
+            row = data.loc[i]
+            embedding, input_tokens = await self._generate_embedding(row[input_field])
+            # Compute dot product between the row embedding and each of the query embeddings
+            similarities = [sum(e1 * e2 for e1, e2 in zip(embedding, q_emb)) for q_emb in query_embeddings]
+            # Compute the final similarity score based on the selected mode
+            if self.similarity_mode == 'max':
+                response = {output_field: max(similarities)}
+            else:  # self.similarity_mode == 'mean'
+                response = {output_field: sum(similarities) / len(similarities)}
+            await output_queue.put((i, response, input_tokens, 0))
+            row_queue.task_done()
+
+    def _validate_input(self, data: pd.DataFrame, input_fields: list[str], output_fields: list[str], is_similarity: bool):
+        if self.model not in self.pricing:
+            self.logger.warning(f"No pricing available for {self.model}; cost will be reported as 0.")
+
+        if is_similarity:
+            if not self.is_embedding_model():
+                self.logger.warning(f"You asked to compute similarity, but the current model is not an embedding model. Changing the model to an embedding model: {DEFAULT_EMBEDDING_MODEL}")
+                self.model = DEFAULT_EMBEDDING_MODEL
+            # Check that there is exactly one input and output field
+            if len(input_fields) != 1:
+                self.logger.error("For similarity tasks, there must be exactly one input field (the text to compare to the prompts).")
+                return
+            if len(output_fields) != 1:
+                self.logger.error("For similarity tasks, there must be exactly one output field (the similarity score).")
+                return
+        else:
+            if self.is_embedding_model():
+                self.logger.warning(f"You are using an embedding model ({self.model}) for a non-similarity task. Changing the model to a non-embedding model: {DEFAULT_MODEL}")
+                self.model = DEFAULT_MODEL
+
+        # Check if all input fields are present in the dataframe
+        for field in input_fields:
+            if field not in data.columns:
+                self.logger.error(f"Input field {field} not found.")
+                return
+        # If no input fields are specified, use all columns except the output fields
+        if not input_fields:
+            input_fields = [field for field in data.columns if field not in output_fields]
+
+        # Create missing output fields
+        for field in output_fields:
+            if field not in data.columns:
+                # If the output field is not in the dataframe, add it
+                data[field] = ''
+            else:
+                # Otherise, convert the field to string because the model will be returning strings
+                # TODO: in the future, we may want to specify the type of the output fields
+                data[field] = data[field].fillna('').astype(str)
 
     async def analyze_data(self,
                      data: pd.DataFrame,
                      prompt: str,
+                     similarity_queries: list[str],
                      input_fields: list[str],
                      output_fields: list[str],
                      write_output_rows: Callable[[pd.DataFrame, list[int]], None],
@@ -385,38 +480,8 @@ class Scientist:
             This function is asynchronous and uses `self.parallel_rows` workers to process this many rows in parallel,
             and a single writer to write the output rows.
         '''
-
-        # Check if all input fields are present in the dataframe
-        for field in input_fields:
-            if field not in data.columns:
-                self.logger.error(f"Input field {field} not found.")
-                return
-        # If no input fields are specified, use all columns except the output fields
-        if not input_fields:
-            input_fields = [field for field in data.columns if field not in output_fields]
-
-        # Create missing output fields
-        for field in output_fields:
-            if field not in data.columns:
-                # If the output field is not in the dataframe, add it
-                data[field] = ''
-            else:
-                # Otherise, convert the field to string because the model will be returning strings
-                # TODO: in the future, we may want to specify the type of the output fields
-                data[field] = data[field].fillna('').astype(str)
-
-        if self.model not in self.pricing:
-            self.logger.warning(f"No pricing available for {self.model}; cost will be reported as 0.")
-
-        # Prepare the few-shot examples
-        self._examples = []
-        for i in examples:
-            if i < 0 or i >= len(data):
-                self.logger.error(f"Skipping example {i + row_index_offset} (no such row)")
-                continue
-            row = data.loc[i]
-            self.logger.info(f"Adding example row {i + row_index_offset}")
-            self._add_example(prompt, row, input_fields, output_fields)
+        is_similarity = len(similarity_queries) > 0
+        self._validate_input(data, input_fields, output_fields, is_similarity)
 
         # Create a task queue
         # TODO: We might want to limit the parallelism by the number of rows to process
@@ -424,12 +489,38 @@ class Scientist:
         row_queue = asyncio.Queue(2 * self.parallel_rows)  # Double the size to avoid blocking
         output_queue = asyncio.Queue()
 
-        # Start workers
-        for _ in range(self.parallel_rows):
-            asyncio.create_task(self._analyze_row_worker(data, prompt, input_fields, output_fields, row_queue, output_queue))
+
+        if is_similarity:
+            # Compute embeddings for the prompts
+            tasks = [self._generate_embedding(q) for q in similarity_queries]
+            # TODO: technically if there are too many prompts, we might want to limit the parallelism here as well but this is very unlikely
+            embeddings_and_tokens = await asyncio.gather(*tasks)
+            query_embeddings = [emb for emb, _ in embeddings_and_tokens]
+            input_tokens = sum(tokens for _, tokens in embeddings_and_tokens)
+            # Start workers: create a new coroutine for each task
+            for _ in range(self.parallel_rows):
+                asyncio.create_task(self._similarity_row_worker(
+                    data, query_embeddings, input_fields[0], output_fields[0], row_queue, output_queue
+                ))
+        else:
+            # Prepare the few-shot examples
+            self._examples = []
+            for i in examples:
+                if i < 0 or i >= len(data):
+                    self.logger.error(f"Skipping example {i + row_index_offset} (no such row)")
+                    continue
+                row = data.loc[i]
+                self.logger.info(f"Adding example row {i + row_index_offset}")
+                self._add_example(prompt, row, input_fields, output_fields)
+            input_tokens = 0
+            # Start workers: create a new coroutine for each task
+            for _ in range(self.parallel_rows):
+                asyncio.create_task(self._analyze_row_worker(
+                    data, prompt, input_fields, output_fields, row_queue, output_queue
+                ))
 
         # Start writer
-        stats = JobStats(self.pricing.get(self.model, {'input': 0, 'output': 0}), self.logger)
+        stats = JobStats(self.pricing.get(self.model, {'input': input_tokens, 'output': 0}), self.logger)
         writer_task = asyncio.create_task(self._writer(output_queue, write_output_rows, data, stats, row_index_offset))
 
         # Add rows to be processed by the workers
@@ -456,19 +547,16 @@ class Scientist:
 
     def analyze_csv(self,
                     path: str,
-                    prompt: str,
+                    prompt: str = '',
+                    similarity_queries: list[str] = [],
                     input_fields: list[str] = [],
                     output_fields: list[str] = ['gpt_output'],
                     rows: Iterable[int] | None = None,
                     examples: Iterable[int] = [],
-                    in_place: bool = True,
                     overwrite: bool = False):
-        '''
-            Analyze a CSV file.
-            If in_place is True, save the results to the input file, otherwise create a unique output file.
-        '''
+        '''Analyze a CSV file (in place).'''
         # Create a unique output file name based on current time;
-        # when in_place is True, this file only serves as a backup, in case the finally block fails to run
+        # this file only serves as a backup, in case the finally block fails to run
         out_file_name = os.path.splitext(path)[0] + f'_output_{pd.Timestamp.now().strftime("%Y%m%d%H%M%S")}.csv'
 
         def write_output_rows(data, indices):
@@ -481,11 +569,11 @@ class Scientist:
         if rows is None:
             rows = range(len(data))
         try:
-            _run_async(self.analyze_data(data, prompt, input_fields, output_fields, write_output_rows, rows, examples, overwrite))
+            _run_async(self.analyze_data(data, prompt, similarity_queries, input_fields, output_fields, write_output_rows, rows, examples, overwrite))
         except Exception as e:
             raise RuntimeError(f"Error analyzing CSV: {e}")
         finally:
-            if in_place and os.path.exists(out_file_name):
+            if os.path.exists(out_file_name):
                 data.to_csv(path, index=False)
                 os.remove(out_file_name)
 
@@ -493,11 +581,9 @@ class Scientist:
                           key: str,
                           worksheet_index: int,
                           input_fields: list[str],
-                          input_range: str,
-                          in_place: bool = True):
+                          input_range: str):
         '''
             Open a worksheet in a Google Sheet and return a pair of the worksheet and a pandas dataframe with the data.
-            If in_place is False, create a copy of the worksheet.
             In the data, replace URLs to Google Docs with the content of the documents.
         '''
         if not IN_COLAB:
@@ -510,9 +596,6 @@ class Scientist:
         else:
             spreadsheet = gc.open_by_key(key)
         worksheet = spreadsheet.get_worksheet(worksheet_index)
-        # If in_place is False, create a copy of the worksheet
-        if not in_place:
-            worksheet = worksheet.duplicate(new_sheet_name=self._output_sheet_name(spreadsheet), insert_sheet_index=worksheet_index+1)
 
         header = worksheet.row_values(1)
 
@@ -598,21 +681,20 @@ class Scientist:
     def analyze_google_sheet(self,
                              sheet_key: str,
                              prompt: str,
+                             similarity_queries: list[str] = [],
                              input_fields: list[str] = [],
                              output_fields: list[str] = ['gpt_output'],
                              rows: str = ':',
                              examples: str = '',
-                             in_place: bool = True,
                              overwrite: bool = False,
                              worksheet_index: int = 0):
         '''
             When in Colab: analyze data in the Google Sheet with key `sheet_key`; the user must have write access to the sheet.
             Use `worksheet_index` to specify a sheet other than the first one.
-            If `in_place` is True, the input sheet will be extended with the output data; otherwise a new sheet will be created.
             If `n_rows` is provided, only the first n_rows are processed (useful for testing).
         '''
         # Open the spreadsheet and the worksheet, and read the data
-        worksheet, data = self._read_spreadsheet(sheet_key, worksheet_index, input_fields, f'{rows},{examples}', in_place)
+        worksheet, data = self._read_spreadsheet(sheet_key, worksheet_index, input_fields, f'{rows},{examples}')
         if data is None:
             return
 
@@ -652,14 +734,15 @@ class Scientist:
             worksheet.update_cells(cells)
 
         _run_async(self.analyze_data(data,
-                                      prompt,
-                                      input_fields,
-                                      output_fields,
-                                      write_output_rows,
-                                      input_range,
-                                      example_range,
-                                      overwrite,
-                                      row_index_offset=GSHEET_FIRST_ROW))
+                                     prompt,
+                                     similarity_queries,
+                                     input_fields,
+                                     output_fields,
+                                     write_output_rows,
+                                     input_range,
+                                     example_range,
+                                     overwrite,
+                                     row_index_offset=GSHEET_FIRST_ROW))
 
     def _verified_field_name(self, output_field: str) -> str:
         return f'{output_field}_verified'
@@ -703,14 +786,10 @@ class Scientist:
                             path: str,
                             output_field: str,
                             input_fields: list[str] = [],
-                            rows: Iterable[int] | None = None,
-                            in_place: bool = True):
-        '''
-            The same as check_quotes, but for a CSV file.
-            If in_place is True, save the results to the input file, otherwise create a unique output file.
-        '''
+                            rows: Iterable[int] | None = None):
+        '''The same as check_quotes, but for a CSV file.'''
         # Create a unique output file name based on current time;
-        # when in_place is True, this file only serves as a backup, in case the finally block fails to run
+        # this file only serves as a backup, in case the finally block fails to run
         out_file_name = os.path.splitext(path)[0] + f'_verified_{pd.Timestamp.now().strftime("%Y%m%d%H%M%S")}.csv'
 
         data = pd.read_csv(path)
@@ -721,10 +800,7 @@ class Scientist:
         self.check_quotes(data, output_field, input_fields, rows)
 
         # Save the results
-        if in_place:
-            data.to_csv(path, index=False)
-        else:
-            data.to_csv(out_file_name, index=False)
+        data.to_csv(path, index=False)
 
 
     def check_quotes_google_sheet(self,
