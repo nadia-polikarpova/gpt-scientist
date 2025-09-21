@@ -6,5 +6,7 @@
     "gpt-4.1-nano": {"input": 0.1, "output": 0.4},
     "gpt-5": {"input": 1.25, "output": 10.0, "top_p": false},
     "gpt-5-mini": {"input": 0.25, "output": 2.0, "top_p": false},
-    "gpt-5-nano": {"input": 0.05, "output": 0.4, "top_p": false}
+    "gpt-5-nano": {"input": 0.05, "output": 0.4, "top_p": false},
+    "text-embedding-3-small": {"input": 0.02, "embedding": true},
+    "text-embedding-3-large": {"input": 0.13, "embedding": true}
 }
