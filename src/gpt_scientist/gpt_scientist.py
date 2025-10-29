@@ -343,7 +343,7 @@ class Scientist:
                 if i is None:  # sentinel
                     break
                 if response is None:
-                    logger.error(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
+                    logger.warning(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
                 else:
                     indices_to_write.append(i)
                     for field in response:
@@ -505,7 +505,7 @@ class Scientist:
             self._examples = []
             for i in examples:
                 if i < 0 or i >= len(data):
-                    logger.error(f"Skipping example {i + row_index_offset} (no such row)")
+                    logger.warning(f"Skipping example {i + row_index_offset} (no such row)")
                     continue
                 row = data.loc[i]
                 logger.info(f"Adding example row {i + row_index_offset}")
@@ -524,12 +524,12 @@ class Scientist:
         # Add rows to be processed by the workers
         for i in rows:
             if i < 0 or i >= len(data):
-                logger.error(f"Skipping row {i + row_index_offset} (no such row)")
+                logger.warning(f"Skipping row {i + row_index_offset} (no such row)")
                 continue
             row = data.loc[i]
             if not overwrite and any(row[field] for field in output_fields):
                 # If any of the output fields is already filled, skip the row
-                logger.info(f"Skipping row {i + row_index_offset} (already filled)")
+                logger.debug(f"Skipping row {i + row_index_offset} (already filled)")
                 continue
             await row_queue.put(i)
 
