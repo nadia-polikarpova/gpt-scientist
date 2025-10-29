@@ -40,7 +40,7 @@ def extract_quotes(text: str) -> list[str]:
 
     return all_matches
 
-def fuzzy_find_in_text(quote: str, text: str, max_distance: int) -> str:
+def fuzzy_find_in_text(quote: str, text: str, max_distance: int) -> tuple[str, int] | None:
     # Clean the text and quote by collapsing multiple spaces and normalizing newlines
     text = re.sub(r'\s+', ' ', text)
     quote = re.sub(r'\s+', ' ', quote)

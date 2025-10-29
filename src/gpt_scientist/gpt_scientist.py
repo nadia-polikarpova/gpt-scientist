@@ -8,6 +8,7 @@ from openai import NOT_GIVEN, AsyncOpenAI, NotGiven
 from dotenv import load_dotenv
 import json
 import logging
+logger = logging.getLogger(__name__)
 import requests
 import importlib.resources
 from pydantic import create_model
@@ -42,9 +43,8 @@ DEFAULT_EMBEDDING_MODEL = 'text-embedding-3-small'
 class JobStats:
     '''Statistics for a table processing job.'''
 
-    def __init__(self, pricing: dict, logger: logging.Logger):
+    def __init__(self, pricing: dict):
         '''Initialize JobStats with optional pricing information.'''
-        self.logger = logger
         self.pricing = pricing
         self.rows_processed = 0
         self.input_tokens = 0
@@ -58,7 +58,7 @@ class JobStats:
 
     def report_cost(self):
         cost = self.current_cost()
-        self.logger.info(f"PROCESSED {self.rows_processed} ROWS. TOTAL_COST: ${cost['input']:.4f} + ${cost['output']:.4f} = ${cost['input'] + cost['output']:.4f}")
+        logger.info(f"PROCESSED {self.rows_processed} ROWS. TOTAL_COST: ${cost['input']:.4f} + ${cost['output']:.4f} = ${cost['input'] + cost['output']:.4f}")
 
     def log_rows(self, rows: int, input_tokens: int, output_tokens: int):
         '''Add the tokens used in the current row to the total and log the cost.'''
@@ -91,8 +91,6 @@ class Scientist:
         self.parallel_rows = 100 # How many rows to process in parallel? This is the number of concurrent requests to the model.
         self.output_sheet = 'gpt_output' # Name (prefix) of the worksheet to save the output in Google Sheets
         self.max_fuzzy_distance = 30 # Maximum distance for fuzzy search
-        self.logger = logging.getLogger(__name__)
-        self.logger.setLevel(logging.INFO)
         self._fetch_pricing() # Fetch the pricing table from GitHub or use the local file
 
     def set_model(self, model: str):
@@ -130,7 +128,7 @@ class Scientist:
     def load_system_prompt_from_google_doc(self, doc_id: str):
         '''Load the system prompt from a Google Doc.'''
         if not IN_COLAB:
-            self.logger.error("This method is only available in Google Colab.")
+            logger.error("This method is only available in Google Colab.")
             return
 
         self.system_prompt = self._get_gdoc_content(doc_id)
@@ -142,7 +140,7 @@ class Scientist:
     def set_similarity_mode(self, similarity_mode: str):
         '''Set the similarity mode: 'max' (default) or 'mean'.'''
         if similarity_mode not in ['max', 'mean']:
-            self.logger.error("Invalid similarity mode. Must be 'max' or 'mean'.")
+            logger.error("Invalid similarity mode. Must be 'max' or 'mean'.")
             return
         self.similarity_mode = similarity_mode
 
@@ -175,7 +173,7 @@ class Scientist:
             resp = requests.get(PRICING_URL, timeout=2)
             if resp.ok:
                 self.pricing = resp.json()
-                self.logger.info(f"Fetched pricing table from {PRICING_URL}")
+                logger.info(f"Fetched pricing table from {PRICING_URL}")
                 return
         except requests.RequestException:
             pass
@@ -183,9 +181,9 @@ class Scientist:
         try:
             with importlib.resources.files("gpt_scientist").joinpath("model_pricing.json").open("r") as f:
                 self.pricing = json.load(f)
-                self.logger.info("Loaded pricing table from the local file.")
+                logger.info("Loaded pricing table from the local file.")
         except (FileNotFoundError, json.JSONDecodeError, Exception) as e:
-            self.logger.warning(f"Could not load the pricing table: {e}.")
+            logger.warning(f"Could not load the pricing table: {e}.")
             self.pricing = {}
 
     def set_pricing(self, pricing: dict):
@@ -239,16 +237,16 @@ class Scientist:
                 # Check for missing fields unless we are using structured outputs
                 missing_fields = [field for field in output_fields if field not in response]
                 if missing_fields:
-                    self.logger.warning(f"Response is missing fields {missing_fields}: {response}")
+                    logger.warning(f"Response is missing fields {missing_fields}: {response}")
                     return None
                 # If there are extra fields, we just ignore them
                 return {field: response[field] for field in output_fields if field in response}
             except Exception as _:
-                self.logger.warning(f"Failed to parse response: {completion}")
+                logger.warning(f"Failed to parse response: {completion}")
                 return None
         else:
             if completion.refusal:
-                self.logger.warning(f"Completion was refused: {completion.refusal}")
+                logger.warning(f"Completion was refused: {completion.refusal}")
                 return None
             return completion.parsed.model_dump()
 
@@ -262,7 +260,7 @@ class Scientist:
 
         for attempt in range(self.num_reties):
             if attempt > 0:
-                self.logger.warning(f"Attempt {attempt + 1}")
+                logger.warning(f"Attempt {attempt + 1}")
 
             try:
                 completions = await self._prompt_model(prompt, output_fields)
@@ -273,16 +271,16 @@ class Scientist:
                     req_output_tokens += u.completion_tokens
                 else:
                     # For older models, we might not have usage information
-                    self.logger.warning("No usage information in the response; cost will be reported as 0.")
+                    logger.warning("No usage information in the response; cost will be reported as 0.")
 
                 for i in range(self.num_results):
                     response = self._parse_response(completions.choices[i].message, output_fields)
                     if response is None:
                         continue
-                    self.logger.debug(f"Response:\n{response}")
+                    logger.debug(f"Response:\n{response}")
                     return response, req_input_tokens, req_output_tokens
             except Exception as e:
-                self.logger.warning(f"Could not get a response from the model: {e}")
+                logger.warning(f"Could not get a response from the model: {e}")
 
         return None, req_input_tokens, req_output_tokens
 
@@ -296,7 +294,7 @@ class Scientist:
         if u:
             return response.data[0].embedding, u.prompt_tokens
         else:
-            self.logger.warning("No usage information in the embedding response; cost will be reported as 0.")
+            logger.warning("No usage information in the embedding response; cost will be reported as 0.")
             return response.data[0].embedding, 0
 
     def _input_fields_and_values(self, fields: list[str], row: pd.Series) -> str:
@@ -329,7 +327,7 @@ class Scientist:
             # Wait until there's something in the queue
             first_row, response, input_tokens, output_tokens = await queue.get()
             batch.append((first_row, response))
-            # self.logger.info(f"WRITER triggered on row {first_row}. Output queue size: {queue.qsize()}")
+            # logger.info(f"WRITER triggered on row {first_row}. Output queue size: {queue.qsize()}")
 
             # Drain the rest of the queue and save all responses in a batch;
             # this is done because writing to google sheets one row at a time is slow.
@@ -345,7 +343,7 @@ class Scientist:
                 if i is None:  # sentinel
                     break
                 if response is None:
-                    self.logger.error(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
+                    logger.error(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
                 else:
                     indices_to_write.append(i)
                     for field in response:
@@ -418,28 +416,28 @@ class Scientist:
 
     def _validate_input(self, data: pd.DataFrame, input_fields: list[str], output_fields: list[str], is_similarity: bool):
         if self.model not in self.pricing:
-            self.logger.warning(f"No pricing available for {self.model}; cost will be reported as 0.")
+            logger.warning(f"No pricing available for {self.model}; cost will be reported as 0.")
 
         if is_similarity:
             if not self.is_embedding_model():
-                self.logger.warning(f"You asked to compute similarity, but the current model is not an embedding model. Changing the model to an embedding model: {DEFAULT_EMBEDDING_MODEL}")
+                logger.warning(f"You asked to compute similarity, but the current model is not an embedding model. Changing the model to an embedding model: {DEFAULT_EMBEDDING_MODEL}")
                 self.model = DEFAULT_EMBEDDING_MODEL
             # Check that there is exactly one input and output field
             if len(input_fields) != 1:
-                self.logger.error("For similarity tasks, there must be exactly one input field (the text to compare to the prompts).")
+                logger.error("For similarity tasks, there must be exactly one input field (the text to compare to the prompts).")
                 return
             if len(output_fields) != 1:
-                self.logger.error("For similarity tasks, there must be exactly one output field (the similarity score).")
+                logger.error("For similarity tasks, there must be exactly one output field (the similarity score).")
                 return
         else:
             if self.is_embedding_model():
-                self.logger.warning(f"You are using an embedding model ({self.model}) for a non-similarity task. Changing the model to a non-embedding model: {DEFAULT_MODEL}")
+                logger.warning(f"You are using an embedding model ({self.model}) for a non-similarity task. Changing the model to a non-embedding model: {DEFAULT_MODEL}")
                 self.model = DEFAULT_MODEL
 
         # Check if all input fields are present in the dataframe
         for field in input_fields:
             if field not in data.columns:
-                self.logger.error(f"Input field {field} not found.")
+                logger.error(f"Input field {field} not found.")
                 return
         # If no input fields are specified, use all columns except the output fields
         if not input_fields:
@@ -507,10 +505,10 @@ class Scientist:
             self._examples = []
             for i in examples:
                 if i < 0 or i >= len(data):
-                    self.logger.error(f"Skipping example {i + row_index_offset} (no such row)")
+                    logger.error(f"Skipping example {i + row_index_offset} (no such row)")
                     continue
                 row = data.loc[i]
-                self.logger.info(f"Adding example row {i + row_index_offset}")
+                logger.info(f"Adding example row {i + row_index_offset}")
                 self._add_example(prompt, row, input_fields, output_fields)
             input_tokens = 0
             # Start workers: create a new coroutine for each task
@@ -520,18 +518,18 @@ class Scientist:
                 ))
 
         # Start writer
-        stats = JobStats(self.pricing.get(self.model, {'input': input_tokens, 'output': 0}), self.logger)
+        stats = JobStats(self.pricing.get(self.model, {'input': input_tokens, 'output': 0}))
         writer_task = asyncio.create_task(self._writer(output_queue, write_output_rows, data, stats, row_index_offset))
 
         # Add rows to be processed by the workers
         for i in rows:
             if i < 0 or i >= len(data):
-                self.logger.error(f"Skipping row {i + row_index_offset} (no such row)")
+                logger.error(f"Skipping row {i + row_index_offset} (no such row)")
                 continue
             row = data.loc[i]
             if not overwrite and any(row[field] for field in output_fields):
                 # If any of the output fields is already filled, skip the row
-                self.logger.info(f"Skipping row {i + row_index_offset} (already filled)")
+                logger.info(f"Skipping row {i + row_index_offset} (already filled)")
                 continue
             await row_queue.put(i)
 
@@ -587,7 +585,7 @@ class Scientist:
             In the data, replace URLs to Google Docs with the content of the documents.
         '''
         if not IN_COLAB:
-            self.logger.error("This method is only available in Google Colab.")
+            logger.error("This method is only available in Google Colab.")
             return
         creds, _ = default()
         gc = gspread.authorize(creds)
@@ -601,7 +599,7 @@ class Scientist:
 
         duplicate_headers = [col for col in header if header.count(col) > 1]
         if duplicate_headers:
-            self.logger.error(f"Cannot analyze your spreadsheet because it contains duplicate headers: {set(duplicate_headers)}")
+            logger.error(f"Cannot analyze your spreadsheet because it contains duplicate headers: {set(duplicate_headers)}")
             return (worksheet, None)
 
         data = worksheet.get_all_records()
@@ -628,7 +626,7 @@ class Scientist:
             try:
                 return int(s)
             except ValueError:
-                self.logger.error(f"Invalid row range: {range_str}")
+                logger.error(f"Invalid row range: {range_str}")
                 return GSHEET_FIRST_ROW
 
         for r in ranges:
@@ -673,7 +671,7 @@ class Scientist:
         '''If URL is a Google Doc link, return the content of the document as markdown; otherwise return the input unchanged.'''
         match = GOOGLE_DOC_URL_PATTERN.match(url)
         if match:
-            self.logger.info(f"Opening Google Doc {url}")
+            logger.info(f"Opening Google Doc {url}")
             return self._get_gdoc_content(match.group('doc_id'))
         else:
             return url
@@ -766,19 +764,19 @@ class Scientist:
             input_text = '\n\n'.join(data.loc[row, input_fields])
             verified = output
             for quote in quotes:
-                self.logger.info(f'Checking quote: "{quote[:50]}..."')
+                logger.info(f'Checking quote: "{quote[:50]}..."')
                 matched = fuzzy_find_in_text(quote, input_text, self.max_fuzzy_distance)
 
                 if matched:
                     (res, dist) = matched
                     verified = verified.replace(quote, res)
                     if dist == 0:
-                      self.logger.info("Found exact match")
+                      logger.info("Found exact match")
                     else:
-                      self.logger.info(f"Found a match {dist} character(s) apart")
+                      logger.info(f"Found a match {dist} character(s) apart")
                 else:
                     verified = verified.replace(quote, 'QUOTE NOT FOUND')
-                    self.logger.info(f"QUOTE NOT FOUND")
+                    logger.info(f"QUOTE NOT FOUND")
 
             data.loc[row, self._verified_field_name(output_field)] = verified
 

@@ -1,10 +1,9 @@
 from gpt_scientist import Scientist
 import logging
-
-from gpt_scientist import *
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("gpt_scientist").setLevel(logging.INFO)
 
 sc = Scientist() # Either add your OpenAI API key here or create a .env file with OPENAI_API_KEY
-sc.logger.addHandler(logging.StreamHandler()) # We want to see the logs from the library
 
 sc.set_system_prompt("You are an assistant helping to analyze customer reviews.")
 prompt = f'''
