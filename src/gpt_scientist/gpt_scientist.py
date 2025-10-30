@@ -431,11 +431,9 @@ class Scientist:
                 self.model = DEFAULT_EMBEDDING_MODEL
             # Check that there is exactly one input and output field
             if len(input_fields) != 1:
-                logger.error("For similarity tasks, there must be exactly one input field (the text to compare to the prompts).")
-                return
+                raise ValueError("For similarity tasks, there must be exactly one input field (the text to compare to the prompts).")
             if len(output_fields) != 1:
-                logger.error("For similarity tasks, there must be exactly one output field (the similarity score).")
-                return
+                raise ValueError("For similarity tasks, there must be exactly one output field (the similarity score).")
         else:
             if self.is_embedding_model():
                 logger.warning(f"You are using an embedding model ({self.model}) for a non-similarity task. Changing the model to a non-embedding model: {DEFAULT_MODEL}")
@@ -444,13 +442,18 @@ class Scientist:
         # Check if all input fields are present in the dataframe
         for field in input_fields:
             if field not in data.columns:
-                logger.error(f"Input field {field} not found.")
-                return
-        # If no input fields are specified, use all columns except the output fields
+                raise ValueError(f"Input field {field} not found in the data.")
+        # If no input fields are specified, fail
         if not input_fields:
-            input_fields = [field for field in data.columns if field not in output_fields]
+            raise ValueError("No input fields specified.")
+            # input_fields = [field for field in data.columns if field not in output_fields]
 
-        # Create missing output fields
+    def _prepare_output_fields(self, data: pd.DataFrame, output_fields: list[str]):
+        '''
+            Ensure that all output fields are present in the dataframe.
+            If an output field is missing, create it with empty strings.
+            If an output field is present, convert it to string type.
+        '''
         for field in output_fields:
             if field not in data.columns:
                 # If the output field is not in the dataframe, add it
@@ -487,6 +490,7 @@ class Scientist:
         '''
         is_similarity = len(similarity_queries) > 0
         self._validate_input(data, input_fields, output_fields, is_similarity)
+        self._prepare_output_fields(data, output_fields)
 
         # Create a task queue
         # TODO: We might want to limit the parallelism by the number of rows to process
@@ -918,14 +922,36 @@ class Scientist:
 
 T = TypeVar("T")
 
+def _in_notebook() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+        ip = get_ipython()
+        return bool(ip) and "IPKernelApp" in ip.config
+    except Exception:
+        return False
+
 def _run_async(coro: Awaitable[T]) -> T:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No loop is running, safe to use asyncio.run
+        # No loop: scripts/CLI
         return asyncio.run(coro)
 
-    # A loop is already running (e.g., notebook)
-    import nest_asyncio
-    nest_asyncio.apply()
-    return loop.run_until_complete(coro)
+    # Running loop detected
+    if not _in_notebook():
+        # Contract: sync wrappers forbidden in non-notebook async contexts
+        raise RuntimeError(
+            "gpt_scientist sync wrapper was called from an async context; "
+            "use the async API directly (e.g., `await analyze_csv_async(...)`)."
+        )
+
+    # Notebook path: best-effort patch
+    try:
+        import nest_asyncio
+        nest_asyncio.apply(loop)
+        return loop.run_until_complete(coro)
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to run in a notebook event loop (nest_asyncio apply/run). "
+            "Use the async API with `await` instead."
+        ) from e
