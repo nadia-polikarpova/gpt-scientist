@@ -389,11 +389,17 @@ class Scientist:
             i = await row_queue.get()
             if i is None:
                 break
-            row = data.loc[i]
-            full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
-            response, input_tokens, output_tokens = await self._get_response(full_prompt, output_fields)
-            await output_queue.put((i, response, input_tokens, output_tokens))
-            row_queue.task_done()
+            try:
+                row = data.loc[i]
+                full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
+                response, input_tokens, output_tokens = await self._get_response(full_prompt, output_fields)
+                await output_queue.put((i, response, input_tokens, output_tokens))
+            except Exception as e:
+                logger.error(f"Error processing row {i}: {e}")
+                # Put None response to indicate failure
+                await output_queue.put((i, None, 0, 0))
+            finally:
+                row_queue.task_done()
 
     async def _similarity_row_worker(self,
                                       data: pd.DataFrame,
@@ -409,17 +415,23 @@ class Scientist:
             i = await row_queue.get()
             if i is None:
                 break
-            row = data.loc[i]
-            embedding, input_tokens = await self._generate_embedding(row[input_field])
-            # Compute dot product between the row embedding and each of the query embeddings
-            similarities = [sum(e1 * e2 for e1, e2 in zip(embedding, q_emb)) for q_emb in query_embeddings]
-            # Compute the final similarity score based on the selected mode
-            if self.similarity_mode == 'max':
-                response = {output_field: max(similarities)}
-            else:  # self.similarity_mode == 'mean'
-                response = {output_field: sum(similarities) / len(similarities)}
-            await output_queue.put((i, response, input_tokens, 0))
-            row_queue.task_done()
+            try:
+                row = data.loc[i]
+                embedding, input_tokens = await self._generate_embedding(row[input_field])
+                # Compute dot product between the row embedding and each of the query embeddings
+                similarities = [sum(e1 * e2 for e1, e2 in zip(embedding, q_emb)) for q_emb in query_embeddings]
+                # Compute the final similarity score based on the selected mode
+                if self.similarity_mode == 'max':
+                    response = {output_field: max(similarities)}
+                else:  # self.similarity_mode == 'mean'
+                    response = {output_field: sum(similarities) / len(similarities)}
+                await output_queue.put((i, response, input_tokens, 0))
+            except Exception as e:
+                logger.error(f"Error processing row {i}: {e}")
+                # Put None response to indicate failure
+                await output_queue.put((i, None, 0, 0))
+            finally:
+                row_queue.task_done()
 
     def _validate_input(self, data: pd.DataFrame, input_fields: list[str], output_fields: list[str], is_similarity: bool):
         if self.model not in self.pricing:
