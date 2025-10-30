@@ -118,20 +118,27 @@ class Scientist:
         with open(path, 'r') as f:
             self.system_prompt = f.read()
 
-    def _get_gdoc_content(self, doc_id: str) -> str:
+    async def _get_gdoc_content(self, doc_id: str) -> str:
         '''Get the content of a Google Doc.'''
-        creds, _ = default()
-        service = build('docs', 'v1', credentials=creds)
-        doc = service.documents().get(documentId=doc_id).execute()
-        return convert_to_text(doc['body']['content'])
+        def _fetch_doc():
+            creds, _ = default()
+            service = build('docs', 'v1', credentials=creds)
+            doc = service.documents().get(documentId=doc_id).execute()
+            return convert_to_text(doc['body']['content'])
+        return await asyncio.to_thread(_fetch_doc)
 
-    def load_system_prompt_from_google_doc(self, doc_id: str):
-        '''Load the system prompt from a Google Doc.'''
+
+    async def load_system_prompt_from_google_doc_async(self, doc_id: str):
+        '''Load the system prompt from a Google Doc. Async version.'''
         if not IN_COLAB:
             logger.error("This method is only available in Google Colab.")
             return
 
-        self.system_prompt = self._get_gdoc_content(doc_id)
+        self.system_prompt = await self._get_gdoc_content(doc_id)
+
+    def load_system_prompt_from_google_doc(self, doc_id: str):
+        '''Load the system prompt from a Google Doc. Sync wrapper.'''
+        return _run_async(self.load_system_prompt_from_google_doc_async(doc_id))
 
     def set_max_tokens(self, max_tokens: int):
         '''Set the maximum number of tokens to generate.'''
@@ -382,11 +389,17 @@ class Scientist:
             i = await row_queue.get()
             if i is None:
                 break
-            row = data.loc[i]
-            full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
-            response, input_tokens, output_tokens = await self._get_response(full_prompt, output_fields)
-            await output_queue.put((i, response, input_tokens, output_tokens))
-            row_queue.task_done()
+            try:
+                row = data.loc[i]
+                full_prompt = self._create_prompt(prompt, input_fields, output_fields, row)
+                response, input_tokens, output_tokens = await self._get_response(full_prompt, output_fields)
+                await output_queue.put((i, response, input_tokens, output_tokens))
+            except Exception as e:
+                logger.error(f"Error processing row {i}: {e}")
+                # Put None response to indicate failure
+                await output_queue.put((i, None, 0, 0))
+            finally:
+                row_queue.task_done()
 
     async def _similarity_row_worker(self,
                                       data: pd.DataFrame,
@@ -402,17 +415,23 @@ class Scientist:
             i = await row_queue.get()
             if i is None:
                 break
-            row = data.loc[i]
-            embedding, input_tokens = await self._generate_embedding(row[input_field])
-            # Compute dot product between the row embedding and each of the query embeddings
-            similarities = [sum(e1 * e2 for e1, e2 in zip(embedding, q_emb)) for q_emb in query_embeddings]
-            # Compute the final similarity score based on the selected mode
-            if self.similarity_mode == 'max':
-                response = {output_field: max(similarities)}
-            else:  # self.similarity_mode == 'mean'
-                response = {output_field: sum(similarities) / len(similarities)}
-            await output_queue.put((i, response, input_tokens, 0))
-            row_queue.task_done()
+            try:
+                row = data.loc[i]
+                embedding, input_tokens = await self._generate_embedding(row[input_field])
+                # Compute dot product between the row embedding and each of the query embeddings
+                similarities = [sum(e1 * e2 for e1, e2 in zip(embedding, q_emb)) for q_emb in query_embeddings]
+                # Compute the final similarity score based on the selected mode
+                if self.similarity_mode == 'max':
+                    response = {output_field: max(similarities)}
+                else:  # self.similarity_mode == 'mean'
+                    response = {output_field: sum(similarities) / len(similarities)}
+                await output_queue.put((i, response, input_tokens, 0))
+            except Exception as e:
+                logger.error(f"Error processing row {i}: {e}")
+                # Put None response to indicate failure
+                await output_queue.put((i, None, 0, 0))
+            finally:
+                row_queue.task_done()
 
     def _validate_input(self, data: pd.DataFrame, input_fields: list[str], output_fields: list[str], is_similarity: bool):
         if self.model not in self.pricing:
@@ -424,11 +443,9 @@ class Scientist:
                 self.model = DEFAULT_EMBEDDING_MODEL
             # Check that there is exactly one input and output field
             if len(input_fields) != 1:
-                logger.error("For similarity tasks, there must be exactly one input field (the text to compare to the prompts).")
-                return
+                raise ValueError("For similarity tasks, there must be exactly one input field (the text to compare to the prompts).")
             if len(output_fields) != 1:
-                logger.error("For similarity tasks, there must be exactly one output field (the similarity score).")
-                return
+                raise ValueError("For similarity tasks, there must be exactly one output field (the similarity score).")
         else:
             if self.is_embedding_model():
                 logger.warning(f"You are using an embedding model ({self.model}) for a non-similarity task. Changing the model to a non-embedding model: {DEFAULT_MODEL}")
@@ -437,13 +454,18 @@ class Scientist:
         # Check if all input fields are present in the dataframe
         for field in input_fields:
             if field not in data.columns:
-                logger.error(f"Input field {field} not found.")
-                return
-        # If no input fields are specified, use all columns except the output fields
+                raise ValueError(f"Input field {field} not found in the data.")
+        # If no input fields are specified, fail
         if not input_fields:
-            input_fields = [field for field in data.columns if field not in output_fields]
+            raise ValueError("No input fields specified.")
+            # input_fields = [field for field in data.columns if field not in output_fields]
 
-        # Create missing output fields
+    def _prepare_output_fields(self, data: pd.DataFrame, output_fields: list[str]):
+        '''
+            Ensure that all output fields are present in the dataframe.
+            If an output field is missing, create it with empty strings.
+            If an output field is present, convert it to string type.
+        '''
         for field in output_fields:
             if field not in data.columns:
                 # If the output field is not in the dataframe, add it
@@ -480,6 +502,7 @@ class Scientist:
         '''
         is_similarity = len(similarity_queries) > 0
         self._validate_input(data, input_fields, output_fields, is_similarity)
+        self._prepare_output_fields(data, output_fields)
 
         # Create a task queue
         # TODO: We might want to limit the parallelism by the number of rows to process
@@ -543,6 +566,39 @@ class Scientist:
         await writer_task
         stats.report_cost()
 
+    async def analyze_csv_async(self,
+                    path: str,
+                    prompt: str = '',
+                    similarity_queries: list[str] = [],
+                    input_fields: list[str] = [],
+                    output_fields: list[str] = ['gpt_output'],
+                    rows: Iterable[int] | None = None,
+                    examples: Iterable[int] = [],
+                    overwrite: bool = False):
+        '''Analyze a CSV file (in place) - async version.'''
+        # Create a unique output file name based on current time;
+        # this file only serves as a backup, in case the finally block fails to run
+        out_file_name = os.path.splitext(path)[0] + f'_output_{pd.Timestamp.now().strftime("%Y%m%d%H%M%S")}.csv'
+
+        def write_output_rows(data, indices):
+            # Append the rows to the output file
+            data.loc[indices].to_csv(out_file_name, mode='a', header=False, index=True)
+
+        # Use asyncio.to_thread for blocking I/O operations
+        data = await asyncio.to_thread(pd.read_csv, path, dtype=str, na_filter=False)
+        # Write headers once at the top
+        await asyncio.to_thread(data.iloc[[]].to_csv, out_file_name, mode='w', index=True)
+        if rows is None:
+            rows = range(len(data))
+        try:
+            await self.analyze_data(data, prompt, similarity_queries, input_fields, output_fields, write_output_rows, rows, examples, overwrite)
+        except Exception as e:
+            raise RuntimeError(f"Error analyzing CSV: {e}")
+        finally:
+            if os.path.exists(out_file_name):
+                await asyncio.to_thread(data.to_csv, path, index=False)
+                await asyncio.to_thread(os.remove, out_file_name)
+
     def analyze_csv(self,
                     path: str,
                     prompt: str = '',
@@ -552,30 +608,10 @@ class Scientist:
                     rows: Iterable[int] | None = None,
                     examples: Iterable[int] = [],
                     overwrite: bool = False):
-        '''Analyze a CSV file (in place).'''
-        # Create a unique output file name based on current time;
-        # this file only serves as a backup, in case the finally block fails to run
-        out_file_name = os.path.splitext(path)[0] + f'_output_{pd.Timestamp.now().strftime("%Y%m%d%H%M%S")}.csv'
+        '''Analyze a CSV file (in place) - sync wrapper.'''
+        return _run_async(self.analyze_csv_async(path, prompt, similarity_queries, input_fields, output_fields, rows, examples, overwrite))
 
-        def write_output_rows(data, indices):
-            # Append the rows to the output file
-            data.loc[indices].to_csv(out_file_name, mode='a', header=False, index=True)
-
-        data = pd.read_csv(path, dtype=str, na_filter=False)
-        # Write headers once at the top
-        data.iloc[[]].to_csv(out_file_name, mode='w', index=True)
-        if rows is None:
-            rows = range(len(data))
-        try:
-            _run_async(self.analyze_data(data, prompt, similarity_queries, input_fields, output_fields, write_output_rows, rows, examples, overwrite))
-        except Exception as e:
-            raise RuntimeError(f"Error analyzing CSV: {e}")
-        finally:
-            if os.path.exists(out_file_name):
-                data.to_csv(path, index=False)
-                os.remove(out_file_name)
-
-    def _read_spreadsheet(self,
+    async def _read_spreadsheet(self,
                           key: str,
                           worksheet_index: int,
                           input_fields: list[str],
@@ -587,31 +623,43 @@ class Scientist:
         if not IN_COLAB:
             logger.error("This method is only available in Google Colab.")
             return
-        creds, _ = default()
-        gc = gspread.authorize(creds)
-        if "docs.google.com" in key:
-            spreadsheet = gc.open_by_url(key)
-        else:
-            spreadsheet = gc.open_by_key(key)
-        worksheet = spreadsheet.get_worksheet(worksheet_index)
 
-        header = worksheet.row_values(1)
+        # Wrap all gspread I/O operations in to_thread
+        def _open_and_read_sheet():
+            creds, _ = default()
+            gc = gspread.authorize(creds)
+            if "docs.google.com" in key:
+                spreadsheet = gc.open_by_url(key)
+            else:
+                spreadsheet = gc.open_by_key(key)
+            worksheet = spreadsheet.get_worksheet(worksheet_index)
+            header = worksheet.row_values(1)
 
-        duplicate_headers = [col for col in header if header.count(col) > 1]
-        if duplicate_headers:
-            logger.error(f"Cannot analyze your spreadsheet because it contains duplicate headers: {set(duplicate_headers)}")
+            duplicate_headers = [col for col in header if header.count(col) > 1]
+            if duplicate_headers:
+                logger.error(f"Cannot analyze your spreadsheet because it contains duplicate headers: {set(duplicate_headers)}")
+                return (worksheet, None, None)
+
+            data = worksheet.get_all_records()
+            return (worksheet, header, data)
+
+        worksheet, header, data = await asyncio.to_thread(_open_and_read_sheet)
+
+        if data is None:
             return (worksheet, None)
 
-        data = worksheet.get_all_records()
         data = pd.DataFrame(data)
         rows = self._parse_row_ranges(input_range, len(data))
 
         # For those input fields that are URLs to Google Docs, follow the links and get the content as markdown
         for field in input_fields:
             for i in rows:
-                data.at[i, field] = self._follow_google_doc_url(data.at[i, field])
+                value = data.at[i, field]
+                if isinstance(value, str):
+                    data.at[i, field] = await self._follow_google_doc_url(value)
 
         return (worksheet, data)
+
 
     def _parse_row_ranges(self, range_str: str, n_rows: int) -> list[int]:
         '''
@@ -667,16 +715,16 @@ class Scientist:
         else:
             return val  # Leave supported types as-is
 
-    def _follow_google_doc_url(self, url: str) -> str:
+    async def _follow_google_doc_url(self, url: str) -> str:
         '''If URL is a Google Doc link, return the content of the document as markdown; otherwise return the input unchanged.'''
         match = GOOGLE_DOC_URL_PATTERN.match(url)
         if match:
             logger.info(f"Opening Google Doc {url}")
-            return self._get_gdoc_content(match.group('doc_id'))
+            return await self._get_gdoc_content(match.group('doc_id'))
         else:
             return url
 
-    def analyze_google_sheet(self,
+    async def analyze_google_sheet_async(self,
                              sheet_key: str,
                              prompt: str,
                              similarity_queries: list[str] = [],
@@ -690,9 +738,13 @@ class Scientist:
             When in Colab: analyze data in the Google Sheet with key `sheet_key`; the user must have write access to the sheet.
             Use `worksheet_index` to specify a sheet other than the first one.
             If `n_rows` is provided, only the first n_rows are processed (useful for testing).
+            Async version.
         '''
         # Open the spreadsheet and the worksheet, and read the data
-        worksheet, data = self._read_spreadsheet(sheet_key, worksheet_index, input_fields, f'{rows},{examples}')
+        result = await self._read_spreadsheet(sheet_key, worksheet_index, input_fields, f'{rows},{examples}')
+        if result is None:
+            return
+        worksheet, data = result
         if data is None:
             return
 
@@ -700,20 +752,25 @@ class Scientist:
         example_range = self._parse_row_ranges(examples, len(data))
 
         # Prepare the worksheet for output and get output column indices
-        output_column_indices = []
-        header = worksheet.row_values(1)
-        for field in output_fields:
-            if field in header:
-                # If the column exists, get its index (1-based)
-                output_column_indices.append(header.index(field) + 1)
-            else:
-                if len(header) + 1 > worksheet.col_count:
-                    # Add more columns if necessary
-                    worksheet.add_cols(1)
-                # If the column doesn't exist, append it to the header
-                worksheet.update_cell(1, len(header) + 1, field)  # Add to the next available column
-                output_column_indices.append(len(header) + 1)
-                header.append(field)  # Update the header list
+        # Wrap blocking gspread operations in to_thread
+        def _prepare_output_columns():
+            output_column_indices = []
+            header = worksheet.row_values(1)
+            for field in output_fields:
+                if field in header:
+                    # If the column exists, get its index (1-based)
+                    output_column_indices.append(header.index(field) + 1)
+                else:
+                    if len(header) + 1 > worksheet.col_count:
+                        # Add more columns if necessary
+                        worksheet.add_cols(1)
+                    # If the column doesn't exist, append it to the header
+                    worksheet.update_cell(1, len(header) + 1, field)  # Add to the next available column
+                    output_column_indices.append(len(header) + 1)
+                    header.append(field)  # Update the header list
+            return output_column_indices
+
+        output_column_indices = await asyncio.to_thread(_prepare_output_columns)
 
         # Now we have the column indices, prepare the function that outputs a list of rows
         @retry(
@@ -731,7 +788,7 @@ class Scientist:
                     cells.append(gspread.Cell(row=gsheet_row, col=gsheet_col, value=value))
             worksheet.update_cells(cells)
 
-        _run_async(self.analyze_data(data,
+        await self.analyze_data(data,
                                      prompt,
                                      similarity_queries,
                                      input_fields,
@@ -740,7 +797,25 @@ class Scientist:
                                      input_range,
                                      example_range,
                                      overwrite,
-                                     row_index_offset=GSHEET_FIRST_ROW))
+                                     row_index_offset=GSHEET_FIRST_ROW)
+
+    def analyze_google_sheet(self,
+                             sheet_key: str,
+                             prompt: str,
+                             similarity_queries: list[str] = [],
+                             input_fields: list[str] = [],
+                             output_fields: list[str] = ['gpt_output'],
+                             rows: str = ':',
+                             examples: str = '',
+                             overwrite: bool = False,
+                             worksheet_index: int = 0):
+        '''
+            When in Colab: analyze data in the Google Sheet with key `sheet_key`; the user must have write access to the sheet.
+            Use `worksheet_index` to specify a sheet other than the first one.
+            If `n_rows` is provided, only the first n_rows are processed (useful for testing).
+            Sync wrapper.
+        '''
+        return _run_async(self.analyze_google_sheet_async(sheet_key, prompt, similarity_queries, input_fields, output_fields, rows, examples, overwrite, worksheet_index))
 
     def _verified_field_name(self, output_field: str) -> str:
         return f'{output_field}_verified'
@@ -801,48 +876,94 @@ class Scientist:
         data.to_csv(path, index=False)
 
 
+    async def check_quotes_google_sheet_async(self,
+                                      sheet_key: str,
+                                      output_field: str,
+                                      input_fields: list[str] = [],
+                                      rows: str = ':',
+                                      worksheet_index: int = 0):
+        '''The same as check_quotes, but for a Google Sheet. Async version.'''
+        # Open the spreadsheet and the worksheet, and read the data
+        result = await self._read_spreadsheet(sheet_key, worksheet_index, input_fields, rows)
+        if result is None:
+            return
+        worksheet, data = result
+        if data is None:
+            return
+
+        rows_to_check = self._parse_row_ranges(rows, len(data))
+
+        # Find the verified column or create one if it doesn't exist
+        # Wrap blocking gspread operations in to_thread
+        def _prepare_verified_column():
+            verified_column_name = self._verified_field_name(output_field)
+            header = worksheet.row_values(1)
+            if verified_column_name in header:
+                verified_column_index = header.index(verified_column_name) + 1
+            else:
+                output_column_index = header.index(output_field) + 1
+                verified_column_index = output_column_index + 1
+                if verified_column_index > worksheet.col_count:
+                    # Add more columns if necessary
+                    worksheet.add_cols(1)
+                new_col_data = [verified_column_name] + [''] * (worksheet.row_count - 1)
+                worksheet.insert_cols([new_col_data], verified_column_index)
+            return verified_column_name, verified_column_index
+
+        verified_column_name, verified_column_index = await asyncio.to_thread(_prepare_verified_column)
+
+        # Perform quote checks (this is CPU-bound, not I/O)
+        self.check_quotes(data, output_field, input_fields, rows_to_check)
+
+        # Write results back to sheet
+        def _write_verified_column():
+            verified_column_data = [self._convert_value_for_gsheet(val) for val in data[verified_column_name].tolist()]
+            verified_column_range = rowcol_to_a1(GSHEET_FIRST_ROW, verified_column_index) + ':' + rowcol_to_a1(GSHEET_FIRST_ROW + len(data) - 1, verified_column_index)
+            worksheet.update([verified_column_data], verified_column_range, major_dimension='COLUMNS')
+
+        await asyncio.to_thread(_write_verified_column)
+
     def check_quotes_google_sheet(self,
                                       sheet_key: str,
                                       output_field: str,
                                       input_fields: list[str] = [],
                                       rows: str = ':',
                                       worksheet_index: int = 0):
-        '''The same as check_quotes, but for a Google Sheet.'''
-        # Open the spreadsheet and the worksheet, and read the data
-        worksheet, data = self._read_spreadsheet(sheet_key, worksheet_index, input_fields, rows)
-        if data is None:
-            return
-
-        rows = self._parse_row_ranges(rows, len(data))
-        # Find the verified column or create one if it doesn't exist
-        verified_column = self._verified_field_name(output_field)
-        header = worksheet.row_values(1)
-        if verified_column in header:
-            verified_column_index = header.index(verified_column) + 1
-        else:
-            output_column_index = header.index(output_field) + 1
-            verified_column_index = output_column_index + 1
-            if verified_column_index > worksheet.col_count:
-                # Add more columns if necessary
-                worksheet.add_cols(1)
-            new_col_data = [verified_column] + [''] * (worksheet.row_count - 1)
-            worksheet.insert_cols([new_col_data], verified_column_index)
-
-        self.check_quotes(data, output_field, input_fields, rows)
-        verified_column = [self._convert_value_for_gsheet(val) for val in data[verified_column].tolist()]
-        verified_column_range = rowcol_to_a1(GSHEET_FIRST_ROW, verified_column_index) + ':' + rowcol_to_a1(GSHEET_FIRST_ROW + len(data) - 1, verified_column_index)
-        worksheet.update([verified_column], verified_column_range, major_dimension='COLUMNS')
+        '''The same as check_quotes, but for a Google Sheet. Sync wrapper.'''
+        return _run_async(self.check_quotes_google_sheet_async(sheet_key, output_field, input_fields, rows, worksheet_index))
 
 T = TypeVar("T")
+
+def _in_notebook() -> bool:
+    try:
+        from IPython import get_ipython  # type: ignore
+        ip = get_ipython()
+        return bool(ip) and "IPKernelApp" in ip.config
+    except Exception:
+        return False
 
 def _run_async(coro: Awaitable[T]) -> T:
     try:
         loop = asyncio.get_running_loop()
     except RuntimeError:
-        # No loop is running, safe to use asyncio.run
+        # No loop: scripts/CLI
         return asyncio.run(coro)
 
-    # A loop is already running (e.g., notebook)
-    import nest_asyncio
-    nest_asyncio.apply()
-    return loop.run_until_complete(coro)
+    # Running loop detected
+    if not _in_notebook():
+        # Contract: sync wrappers forbidden in non-notebook async contexts
+        raise RuntimeError(
+            "gpt_scientist sync wrapper was called from an async context; "
+            "use the async API directly (e.g., `await analyze_csv_async(...)`)."
+        )
+
+    # Notebook path: best-effort patch
+    try:
+        import nest_asyncio
+        nest_asyncio.apply(loop)
+        return loop.run_until_complete(coro)
+    except Exception as e:
+        raise RuntimeError(
+            "Failed to run in a notebook event loop (nest_asyncio apply/run). "
+            "Use the async API with `await` instead."
+        ) from e
