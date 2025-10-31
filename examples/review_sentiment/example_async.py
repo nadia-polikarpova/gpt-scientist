@@ -2,6 +2,10 @@
 import asyncio
 import logging
 from gpt_scientist import Scientist
+from dotenv import load_dotenv
+
+# Load environment variables from .env file (including OPENAI_API_KEY)
+load_dotenv()
 
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("gpt_scientist").setLevel(logging.INFO)
@@ -9,7 +13,7 @@ logging.getLogger("gpt_scientist").setLevel(logging.INFO)
 
 async def main():
     """Async main function to demonstrate the async API."""
-    sc = Scientist()  # Either add your OpenAI API key here or create a .env file with OPENAI_API_KEY
+    sc = Scientist()  # Reads OPENAI_API_KEY from environment, or pass api_key parameter
 
     sc.set_system_prompt("You are an assistant helping to analyze customer reviews.")
     prompt = '''

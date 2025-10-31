@@ -1,9 +1,14 @@
 from gpt_scientist import Scientist
+from dotenv import load_dotenv
 import logging
+
+# Load environment variables from .env file (including OPENAI_API_KEY)
+load_dotenv()
+
 logging.basicConfig(level=logging.WARNING)
 logging.getLogger("gpt_scientist").setLevel(logging.INFO)
 
-sc = Scientist() # Either add your OpenAI API key here or create a .env file with OPENAI_API_KEY
+sc = Scientist()  # Reads OPENAI_API_KEY from environment, or pass api_key parameter
 
 sc.set_system_prompt("You are an assistant helping to analyze customer reviews.")
 prompt = f'''
