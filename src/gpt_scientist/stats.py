@@ -17,9 +17,9 @@ class JobStats:
 
     def current_cost(self) -> dict:
         '''Return the cost corresponding to the current number of input and output tokens.'''
-        current_pricing = self.pricing.get(self.model, {'input': 0, 'output': 0})
-        input_cost = current_pricing['input'] * self.input_tokens / 1e6
-        output_cost = current_pricing['output'] * self.output_tokens / 1e6
+        current_pricing = self.pricing.get(self.model, {})
+        input_cost = current_pricing.get('input', 0) * self.input_tokens / 1e6
+        output_cost = current_pricing.get('output', 0) * self.output_tokens / 1e6
         return {'input': input_cost, 'output': output_cost}
 
     def report_cost(self):

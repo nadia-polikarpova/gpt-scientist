@@ -40,7 +40,7 @@ class Scientist:
         self.output_sheet = 'gpt_output'  # Name (prefix) of the worksheet in Google Sheets
         self.max_fuzzy_distance = 30  # Maximum distance for fuzzy search
         self.pricing = fetch_pricing()
-        self.stats = None  # Will be populated before running an analysis
+        self._init_job_stats()  # We don't really need to init this here, but we do this to avoid mypy errors
 
     def _create_llm_client(self) -> LLMClient:
         """Create an LLM client with current configuration."""
