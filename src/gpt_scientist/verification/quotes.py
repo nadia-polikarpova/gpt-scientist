@@ -1,23 +1,78 @@
-"""Quote verification functionality."""
+"""Core quote verification functionality."""
 
-import asyncio
 import logging
+import re
 import pandas as pd
 from typing import Iterable
-from gpt_scientist.quote_checker import extract_quotes, fuzzy_find_in_text
-from gpt_scientist.config import GSHEET_FIRST_ROW
+from fuzzysearch import find_near_matches
 
 logger = logging.getLogger(__name__)
 
-# Check if we are in Google Colab
-try:
-    from google.colab import auth
-    IN_COLAB = True
-    import gspread
-    from gspread.utils import rowcol_to_a1
-    auth.authenticate_user()
-except ImportError:
-    IN_COLAB = False
+# Quote extraction utilities
+QUOTE_PAIRS = {
+    '"': '"',
+    '«': '»',
+    '„': '"',
+    '‚': '\u2019',  # Right single quotation mark
+    '\u2018': '\u2019',  # Left and right single quotation marks
+    '"': '"',
+    '‹': '›',
+    "'": "'"
+}
+
+
+def extract_quotes(text: str) -> list[str]:
+    """
+    If text contains only properly quoted strings separated by whitespace,
+    extract all substrings between the quotes. Otherwise, return the whole text.
+    """
+    # Build patterns that disallow closing quotes within the quoted string
+    quoted_patterns = []
+    for opening, closing in QUOTE_PAIRS.items():
+        # Use negative character class to disallow the closing quote
+        quoted_patterns.append(f'{re.escape(opening)}[^{re.escape(closing)}]*{re.escape(closing)}')
+
+    quoted_string = '|'.join(quoted_patterns)
+    quoted_sequence = rf'^(?:\s*(?:{quoted_string}))*\s*$'
+
+    # Check if the entire text matches our pattern
+    if not re.match(quoted_sequence, text):
+        return [text]
+
+    # If it does match, extract all the quoted content
+    all_matches = []
+    for opening, closing in QUOTE_PAIRS.items():
+        # For extraction, we use a capturing group but still disallow closing quotes
+        pattern = rf'{re.escape(opening)}([^{re.escape(closing)}]*){re.escape(closing)}'
+        matches = re.findall(pattern, text)
+        all_matches.extend(matches)
+
+    return all_matches
+
+
+def fuzzy_find_in_text(quote: str, text: str, max_distance: int) -> tuple[str, int] | None:
+    """
+    Find a quote in text using fuzzy matching.
+    Returns (matched_text, distance) or None if not found.
+    """
+    # Clean the text and quote by collapsing multiple spaces and normalizing newlines
+    text = re.sub(r'\s+', ' ', text)
+    quote = re.sub(r'\s+', ' ', quote)
+
+    # First check if the quote is an exact match, ignoring case
+    # (because this is common and faster)
+    exact_match = re.search(re.escape(quote), text, re.IGNORECASE)
+    if exact_match:
+        return (exact_match.group(), 0)
+
+    # Otherwise, use fuzzy search to find the closest
+    matches = find_near_matches(quote, text, max_l_dist=min(len(quote)//4, max_distance))
+    if not matches:
+        return None
+    else:
+        # Find the match with the smallest distance
+        best_match = min(matches, key=lambda match: match.dist)
+        return (best_match.matched, best_match.dist)
 
 
 def verified_field_name(output_field: str) -> str:
@@ -42,7 +97,7 @@ def check_quotes(
     if not (verified_field in data.columns):
         data[verified_field] = ''
     for row in rows:
-        output = data.loc[row, output_field]
+        output = str(data.loc[row, output_field])
         quotes = extract_quotes(output)
         input_text = '\n\n'.join(data.loc[row, input_fields])
         verified = output
@@ -62,77 +117,3 @@ def check_quotes(
                 logger.info(f"QUOTE NOT FOUND")
 
         data.loc[row, verified_field] = verified
-
-
-def check_quotes_csv(
-    path: str,
-    output_field: str,
-    input_fields: list[str] = [],
-    rows: Iterable[int] | None = None,
-    max_fuzzy_distance: int = 30
-):
-    """Check quotes in a CSV file."""
-    data = pd.read_csv(path)
-    if rows is None:
-        rows = range(len(data))
-
-    # Perform quote checks
-    check_quotes(data, output_field, input_fields, rows, max_fuzzy_distance)
-
-    # Save the results
-    data.to_csv(path, index=False)
-
-
-async def check_quotes_google_sheet_async(
-    sheet_key: str,
-    output_field: str,
-    input_fields: list[str] = [],
-    rows: str = ':',
-    worksheet_index: int = 0,
-    max_fuzzy_distance: int = 30
-):
-    """Check quotes in a Google Sheet. Async version."""
-    if not IN_COLAB:
-        logger.error("This method is only available in Google Colab.")
-        return
-
-    from gpt_scientist.processors.sheets import read_spreadsheet, parse_row_ranges, convert_value_for_gsheet
-
-    # Open the spreadsheet and the worksheet, and read the data
-    result = await read_spreadsheet(sheet_key, worksheet_index, input_fields, rows)
-    if result is None:
-        return
-    worksheet, data = result
-    if data is None:
-        return
-
-    rows_to_check = parse_row_ranges(rows, len(data))
-
-    # Find the verified column or create one if it doesn't exist
-    def _prepare_verified_column():
-        verified_column_name = verified_field_name(output_field)
-        header = worksheet.row_values(1)
-        if verified_column_name in header:
-            verified_column_index = header.index(verified_column_name) + 1
-        else:
-            output_column_index = header.index(output_field) + 1
-            verified_column_index = output_column_index + 1
-            if verified_column_index > worksheet.col_count:
-                # Add more columns if necessary
-                worksheet.add_cols(1)
-            new_col_data = [verified_column_name] + [''] * (worksheet.row_count - 1)
-            worksheet.insert_cols([new_col_data], verified_column_index)
-        return verified_column_name, verified_column_index
-
-    verified_column_name, verified_column_index = await asyncio.to_thread(_prepare_verified_column)
-
-    # Perform quote checks (this is CPU-bound, not I/O)
-    check_quotes(data, output_field, input_fields, rows_to_check, max_fuzzy_distance)
-
-    # Write results back to sheet
-    def _write_verified_column():
-        verified_column_data = [convert_value_for_gsheet(val) for val in data[verified_column_name].tolist()]
-        verified_column_range = rowcol_to_a1(GSHEET_FIRST_ROW, verified_column_index) + ':' + rowcol_to_a1(GSHEET_FIRST_ROW + len(data) - 1, verified_column_index)
-        worksheet.update([verified_column_data], verified_column_range, major_dimension='COLUMNS')
-
-    await asyncio.to_thread(_write_verified_column)

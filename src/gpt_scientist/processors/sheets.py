@@ -3,11 +3,12 @@
 import asyncio
 import logging
 import pandas as pd
-import re
-from typing import Iterable
 from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception_type
+from gpt_scientist.llm.client import LLMClient
 from gpt_scientist.processors.core import analyze_data
 from gpt_scientist.config import GSHEET_FIRST_ROW, GOOGLE_DOC_URL_PATTERN
+from gpt_scientist.stats import JobStats
+from gpt_scientist.verification.quotes import check_quotes, verified_field_name
 
 logger = logging.getLogger(__name__)
 
@@ -16,7 +17,6 @@ try:
     from google.colab import auth
     IN_COLAB = True
     import gspread
-    from gspread.utils import rowcol_to_a1
     from google.auth import default
     from googleapiclient.discovery import build
     auth.authenticate_user()
@@ -144,19 +144,20 @@ async def read_spreadsheet(
     return (worksheet, data)
 
 
-async def analyze_google_sheet_async(
+async def analyze_google_sheet(
     sheet_key: str,
     prompt: str,
-    similarity_queries: list[str] = [],
-    input_fields: list[str] = [],
-    output_fields: list[str] = ['gpt_output'],
-    rows: str = ':',
-    examples: str = '',
-    overwrite: bool = False,
-    worksheet_index: int = 0,
-    llm_client=None,
-    similarity_mode: str = 'max',
-    parallel_rows: int = 100
+    similarity_queries: list[str],
+    input_fields: list[str],
+    output_fields: list[str],
+    rows: str,
+    examples: str,
+    overwrite: bool,
+    worksheet_index: int,
+    llm_client: LLMClient,
+    similarity_mode: str,
+    parallel_rows: int,
+    stats: JobStats
 ):
     """
     When in Colab: analyze data in the Google Sheet with key `sheet_key`; the user must have write access to the sheet.
@@ -223,5 +224,62 @@ async def analyze_google_sheet_async(
         llm_client,
         similarity_mode,
         parallel_rows,
+        stats,
         row_index_offset=GSHEET_FIRST_ROW
     )
+
+
+async def check_quotes_google_sheet(
+    sheet_key: str,
+    output_field: str,
+    input_fields: list[str] = [],
+    rows: str = ':',
+    worksheet_index: int = 0,
+    max_fuzzy_distance: int = 30
+):
+    """Check quotes in a Google Sheet. Async version."""
+    if not IN_COLAB:
+        logger.error("This method is only available in Google Colab.")
+        return
+
+    # Import here since it's only available in Colab
+    from gspread.utils import rowcol_to_a1
+
+    # Open the spreadsheet and the worksheet, and read the data
+    result = await read_spreadsheet(sheet_key, worksheet_index, input_fields, rows)
+    if result is None:
+        return
+    worksheet, data = result
+    if data is None:
+        return
+
+    rows_to_check = parse_row_ranges(rows, len(data))
+
+    # Find the verified column or create one if it doesn't exist
+    def _prepare_verified_column():
+        verified_column_name = verified_field_name(output_field)
+        header = worksheet.row_values(1)
+        if verified_column_name in header:
+            verified_column_index = header.index(verified_column_name) + 1
+        else:
+            output_column_index = header.index(output_field) + 1
+            verified_column_index = output_column_index + 1
+            if verified_column_index > worksheet.col_count:
+                # Add more columns if necessary
+                worksheet.add_cols(1)
+            new_col_data = [verified_column_name] + [''] * (worksheet.row_count - 1)
+            worksheet.insert_cols([new_col_data], verified_column_index)
+        return verified_column_name, verified_column_index
+
+    verified_column_name, verified_column_index = await asyncio.to_thread(_prepare_verified_column)
+
+    # Perform quote checks (this is CPU-bound, not I/O)
+    check_quotes(data, output_field, input_fields, rows_to_check, max_fuzzy_distance)
+
+    # Write results back to sheet
+    def _write_verified_column():
+        verified_column_data = [convert_value_for_gsheet(val) for val in data[verified_column_name].tolist()]
+        verified_column_range = rowcol_to_a1(GSHEET_FIRST_ROW, verified_column_index) + ':' + rowcol_to_a1(GSHEET_FIRST_ROW + len(data) - 1, verified_column_index)
+        worksheet.update([verified_column_data], verified_column_range, major_dimension='COLUMNS')
+
+    await asyncio.to_thread(_write_verified_column)

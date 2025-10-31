@@ -4,6 +4,7 @@ import asyncio
 import logging
 import pandas as pd
 from typing import Callable, Iterable
+from gpt_scientist.llm.client import LLMClient
 from gpt_scientist.stats import JobStats
 from gpt_scientist.processors.workers import writer, analyze_row_worker, similarity_row_worker
 from gpt_scientist.llm.prompts import create_example_messages
@@ -13,20 +14,19 @@ logger = logging.getLogger(__name__)
 
 
 def validate_input(data: pd.DataFrame, input_fields: list[str], output_fields: list[str],
-                   is_similarity: bool, model: str, pricing: dict) -> tuple[str, list]:
+                   is_similarity: bool, model: str, pricing: dict) -> str:
     """
     Validate input parameters and adjust model if necessary.
-    Returns (adjusted_model, warnings).
+    Return the (potentially adjusted) model to use.
     """
-    warnings = []
     adjusted_model = model
 
     if model not in pricing:
-        warnings.append(f"No pricing available for {model}; cost will be reported as 0.")
+        logger.warning(f"No pricing available for {model}; cost will be reported as 0.")
 
     if is_similarity:
         if not is_embedding_model(model, pricing):
-            warnings.append(f"You asked to compute similarity, but the current model is not an embedding model. Changing the model to an embedding model: {DEFAULT_EMBEDDING_MODEL}")
+            logger.warning(f"You asked to compute similarity, but the current model is not an embedding model. Changing the model to an embedding model: {DEFAULT_EMBEDDING_MODEL}")
             adjusted_model = DEFAULT_EMBEDDING_MODEL
         # Check that there is exactly one input and output field
         if len(input_fields) != 1:
@@ -35,7 +35,7 @@ def validate_input(data: pd.DataFrame, input_fields: list[str], output_fields: l
             raise ValueError("For similarity tasks, there must be exactly one output field (the similarity score).")
     else:
         if is_embedding_model(model, pricing):
-            warnings.append(f"You are using an embedding model ({model}) for a non-similarity task. Changing the model to a non-embedding model: {DEFAULT_MODEL}")
+            logger.warning(f"You are using an embedding model ({model}) for a non-similarity task. Changing the model to a non-embedding model: {DEFAULT_MODEL}")
             adjusted_model = DEFAULT_MODEL
 
     # Check if all input fields are present in the dataframe
@@ -46,10 +46,7 @@ def validate_input(data: pd.DataFrame, input_fields: list[str], output_fields: l
     if not input_fields:
         raise ValueError("No input fields specified.")
 
-    for warning in warnings:
-        logger.warning(warning)
-
-    return adjusted_model, warnings
+    return adjusted_model
 
 
 def prepare_output_fields(data: pd.DataFrame, output_fields: list[str]):
@@ -78,9 +75,10 @@ async def analyze_data(
     rows: Iterable[int],
     examples: Iterable[int],
     overwrite: bool,
-    llm_client,
+    llm_client: LLMClient,
     similarity_mode: str,
     parallel_rows: int,
+    stats: JobStats,
     row_index_offset: int = 0
 ):
     """
@@ -100,10 +98,11 @@ async def analyze_data(
     is_similarity = len(similarity_queries) > 0
 
     # Validate and potentially adjust model
-    adjusted_model, _ = validate_input(data, input_fields, output_fields, is_similarity,
-                                       llm_client.model, llm_client.pricing)
+    adjusted_model = validate_input(data, input_fields, output_fields, is_similarity,
+                                    llm_client.model, llm_client.pricing)
     if adjusted_model != llm_client.model:
         llm_client.model = adjusted_model
+        stats.model = adjusted_model
 
     prepare_output_fields(data, output_fields)
 
@@ -117,6 +116,7 @@ async def analyze_data(
         embeddings_and_tokens = await asyncio.gather(*tasks)
         query_embeddings = [emb for emb, _ in embeddings_and_tokens]
         input_tokens = sum(tokens for _, tokens in embeddings_and_tokens)
+        stats.input_tokens += input_tokens
         # Start workers
         for _ in range(parallel_rows):
             asyncio.create_task(similarity_row_worker(
@@ -135,7 +135,6 @@ async def analyze_data(
             example_messages.extend(create_example_messages(prompt, row, input_fields, output_fields,
                                                             llm_client.use_structured_outputs))
         llm_client.set_examples(example_messages)
-        input_tokens = 0
         # Start workers
         for _ in range(parallel_rows):
             asyncio.create_task(analyze_row_worker(
@@ -143,7 +142,6 @@ async def analyze_data(
             ))
 
     # Start writer
-    stats = JobStats(llm_client.pricing.get(llm_client.model, {'input': input_tokens, 'output': 0}))
     writer_task = asyncio.create_task(writer(output_queue, write_output_rows, data, stats, row_index_offset))
 
     # Add rows to be processed by the workers

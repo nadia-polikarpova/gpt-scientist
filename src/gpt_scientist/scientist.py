@@ -7,10 +7,10 @@ import logging
 
 from gpt_scientist.config import DEFAULT_MODEL, fetch_pricing
 from gpt_scientist.llm.client import LLMClient
-from gpt_scientist.processors.csv import analyze_csv_async
-from gpt_scientist.processors.sheets import analyze_google_sheet_async, get_gdoc_content, IN_COLAB
-from gpt_scientist.verification.quotes import check_quotes_csv, check_quotes_google_sheet_async
+from gpt_scientist.processors.csv import analyze_csv, check_quotes_csv
+from gpt_scientist.processors.sheets import analyze_google_sheet, check_quotes_google_sheet, get_gdoc_content, IN_COLAB
 from gpt_scientist.utils import run_async
+from gpt_scientist.stats import JobStats
 
 logger = logging.getLogger(__name__)
 
@@ -40,6 +40,7 @@ class Scientist:
         self.output_sheet = 'gpt_output'  # Name (prefix) of the worksheet in Google Sheets
         self.max_fuzzy_distance = 30  # Maximum distance for fuzzy search
         self.pricing = fetch_pricing()
+        self.stats = None  # Will be populated before running an analysis
 
     def _create_llm_client(self) -> LLMClient:
         """Create an LLM client with current configuration."""
@@ -54,6 +55,10 @@ class Scientist:
             self.top_p,
             self.pricing
         )
+
+    def _init_job_stats(self):
+        """Initialize JobStats with current model and pricing."""
+        self.stats = JobStats(self.model, self.pricing)
 
     # Configuration setters
     def set_model(self, model: str):
@@ -135,15 +140,19 @@ class Scientist:
         similarity_queries: list[str] = [],
         input_fields: list[str] = [],
         output_fields: list[str] = ['gpt_output'],
-        rows: Iterable[int] | None = None,
-        examples: Iterable[int] = [],
+        rows: Optional[Iterable[int]] = None,
+        examples: Optional[Iterable[int]] = None,
         overwrite: bool = False
     ):
         """Analyze a CSV file (in place) - async version."""
         llm_client = self._create_llm_client()
-        return await analyze_csv_async(
+        # Reset stats for this analysis run
+        self._init_job_stats()
+        assert self.stats is not None
+        return await analyze_csv(
             path, prompt, similarity_queries, input_fields, output_fields,
-            rows, examples, overwrite, llm_client, self.similarity_mode, self.parallel_rows
+            rows, examples, overwrite, llm_client, self.similarity_mode, self.parallel_rows,
+            self.stats
         )
 
     def analyze_csv(
@@ -153,8 +162,8 @@ class Scientist:
         similarity_queries: list[str] = [],
         input_fields: list[str] = [],
         output_fields: list[str] = ['gpt_output'],
-        rows: Iterable[int] | None = None,
-        examples: Iterable[int] = [],
+        rows: Optional[Iterable[int]] = None,
+        examples: Optional[Iterable[int]] = None,
         overwrite: bool = False
     ):
         """Analyze a CSV file (in place) - sync wrapper."""
@@ -180,10 +189,13 @@ class Scientist:
         Async version.
         """
         llm_client = self._create_llm_client()
-        return await analyze_google_sheet_async(
+        # Reset stats for this analysis run
+        self._init_job_stats()
+        assert self.stats is not None
+        return await analyze_google_sheet(
             sheet_key, prompt, similarity_queries, input_fields, output_fields,
             rows, examples, overwrite, worksheet_index, llm_client,
-            self.similarity_mode, self.parallel_rows
+            self.similarity_mode, self.parallel_rows, self.stats
         )
 
     def analyze_google_sheet(
@@ -208,6 +220,16 @@ class Scientist:
         ))
 
     # Quote verification methods
+    async def check_quotes_csv_async(
+        self,
+        path: str,
+        output_field: str,
+        input_fields: list[str] = [],
+        rows: Iterable[int] | None = None
+    ):
+        """Check quotes in a CSV file. Async version."""
+        return await check_quotes_csv(path, output_field, input_fields, rows, self.max_fuzzy_distance)
+
     def check_quotes_csv(
         self,
         path: str,
@@ -215,8 +237,8 @@ class Scientist:
         input_fields: list[str] = [],
         rows: Iterable[int] | None = None
     ):
-        """Check quotes in a CSV file."""
-        return check_quotes_csv(path, output_field, input_fields, rows, self.max_fuzzy_distance)
+        """Check quotes in a CSV file. Sync wrapper."""
+        return run_async(self.check_quotes_csv_async(path, output_field, input_fields, rows))
 
     async def check_quotes_google_sheet_async(
         self,
@@ -227,7 +249,7 @@ class Scientist:
         worksheet_index: int = 0
     ):
         """Check quotes in a Google Sheet. Async version."""
-        return await check_quotes_google_sheet_async(
+        return await check_quotes_google_sheet(
             sheet_key, output_field, input_fields, rows, worksheet_index, self.max_fuzzy_distance
         )
 
