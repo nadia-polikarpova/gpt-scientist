@@ -12,6 +12,7 @@ class JobStats:
         self.model = model
         self.pricing = pricing
         self.rows_processed = 0
+        self.errors = 0
         self.input_tokens = 0
         self.output_tokens = 0
 
@@ -33,3 +34,7 @@ class JobStats:
         self.output_tokens += output_tokens
         if self.rows_processed % 10 == 0:
             self.report_cost()
+
+    def log_error(self):
+        '''Increment the error counter.'''
+        self.errors += 1

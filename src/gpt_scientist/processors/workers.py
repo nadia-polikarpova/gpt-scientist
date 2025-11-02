@@ -3,7 +3,7 @@
 import asyncio
 import logging
 import pandas as pd
-from typing import Callable, Optional
+from typing import Callable
 from gpt_scientist.stats import JobStats
 from gpt_scientist.llm.prompts import create_prompt
 
@@ -14,7 +14,7 @@ async def writer(
     queue: asyncio.Queue,
     write_output_rows: Callable[[pd.DataFrame, list[int]], None],
     data: pd.DataFrame,
-    job_stats: Optional[JobStats] = None,
+    job_stats: JobStats,
     row_index_offset: int = 0
 ):
     """
@@ -42,6 +42,7 @@ async def writer(
                 break
             if response is None:
                 logger.warning(f"The model failed to generate a valid response for row: {i + row_index_offset}. Try again later?")
+                job_stats.log_error()
             else:
                 indices_to_write.append(i)
                 for field in response:
@@ -53,10 +54,9 @@ async def writer(
             await asyncio.to_thread(write_output_rows, data, indices_to_write)
 
         # Log the number of rows processed in this batch
-        if job_stats:
-            # We count unsuccessful rows as well, because they still consume tokens, but we don't count the sentinel row
-            rows_processed = len([i for i, _ in batch if i is not None])
-            job_stats.log_rows(rows_processed, input_tokens, output_tokens)
+        # We count unsuccessful rows as well, because they still consume tokens, but we don't count the sentinel row
+        rows_processed = len([i for i, _ in batch if i is not None])
+        job_stats.log_rows(rows_processed, input_tokens, output_tokens)
 
         # Mark all dequeued items as done
         for _ in batch:
