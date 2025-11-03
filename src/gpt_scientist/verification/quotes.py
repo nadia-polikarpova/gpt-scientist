@@ -102,18 +102,17 @@ def check_quotes(
         input_text = '\n\n'.join(data.loc[row, input_fields])
         verified = output
         for quote in quotes:
-            logger.info(f'Checking quote: "{quote[:50]}..."')
             matched = fuzzy_find_in_text(quote, input_text, max_fuzzy_distance)
 
             if matched:
                 (res, dist) = matched
                 verified = verified.replace(quote, res)
                 if dist == 0:
-                    logger.info("Found exact match")
+                    logger.debug(f'Quote "{quote[:50]}...": exact match')
                 else:
-                    logger.info(f"Found a match {dist} character(s) apart")
+                    logger.info(f'Quote "{quote[:50]}...": fuzzy match {dist} character(s) apart')
             else:
                 verified = verified.replace(quote, 'QUOTE NOT FOUND')
-                logger.info(f"QUOTE NOT FOUND")
+                logger.info(f'Quote "{quote[:50]}...": NOT FOUND')
 
         data.loc[row, verified_field] = verified
