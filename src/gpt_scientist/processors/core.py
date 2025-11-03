@@ -118,11 +118,35 @@ async def analyze_data(
         input_tokens = sum(tokens for _, tokens in embeddings_and_tokens)
         stats.input_tokens += input_tokens
         # Start workers
-        for _ in range(parallel_rows):
-            asyncio.create_task(similarity_row_worker(
-                data, query_embeddings, input_fields[0], output_fields[0],
-                row_queue, output_queue, llm_client, similarity_mode
-            ))
+        async with asyncio.TaskGroup() as tg:
+            for _ in range(parallel_rows):
+                tg.create_task(similarity_row_worker(
+                    data, query_embeddings, input_fields[0], output_fields[0],
+                    row_queue, output_queue, llm_client, similarity_mode
+                ))
+            # Start writer
+            tg.create_task(writer(output_queue, write_output_rows, data, stats, row_index_offset))
+
+            # Add rows to be processed by the workers
+            for i in rows:
+                if i < 0 or i >= len(data):
+                    logger.warning(f"Skipping row {i + row_index_offset} (no such row)")
+                    continue
+                row = data.loc[i]
+                if not overwrite and any(row[field] for field in output_fields):
+                    # If any of the output fields is already filled, skip the row
+                    logger.debug(f"Skipping row {i + row_index_offset} (already filled)")
+                    continue
+                await row_queue.put(i)
+
+            # Wait for input processing to finish
+            await row_queue.join()
+
+            # Tell workers and writer to shut down
+            for _ in range(parallel_rows):
+                await row_queue.put(None)
+            await output_queue.put((None, None, 0, 0))
+        # TaskGroup ensures all tasks complete or are cancelled when exiting the context
     else:
         # Prepare the few-shot examples
         example_messages = []
@@ -136,32 +160,32 @@ async def analyze_data(
                                                             llm_client.use_structured_outputs))
         llm_client.set_examples(example_messages)
         # Start workers
-        for _ in range(parallel_rows):
-            asyncio.create_task(analyze_row_worker(
-                data, prompt, input_fields, output_fields, row_queue, output_queue, llm_client
-            ))
+        async with asyncio.TaskGroup() as tg:
+            for _ in range(parallel_rows):
+                tg.create_task(analyze_row_worker(
+                    data, prompt, input_fields, output_fields, row_queue, output_queue, llm_client
+                ))
+            # Start writer
+            tg.create_task(writer(output_queue, write_output_rows, data, stats, row_index_offset))
 
-    # Start writer
-    writer_task = asyncio.create_task(writer(output_queue, write_output_rows, data, stats, row_index_offset))
+            # Add rows to be processed by the workers
+            for i in rows:
+                if i < 0 or i >= len(data):
+                    logger.warning(f"Skipping row {i + row_index_offset} (no such row)")
+                    continue
+                row = data.loc[i]
+                if not overwrite and any(row[field] for field in output_fields):
+                    # If any of the output fields is already filled, skip the row
+                    logger.debug(f"Skipping row {i + row_index_offset} (already filled)")
+                    continue
+                await row_queue.put(i)
 
-    # Add rows to be processed by the workers
-    for i in rows:
-        if i < 0 or i >= len(data):
-            logger.warning(f"Skipping row {i + row_index_offset} (no such row)")
-            continue
-        row = data.loc[i]
-        if not overwrite and any(row[field] for field in output_fields):
-            # If any of the output fields is already filled, skip the row
-            logger.debug(f"Skipping row {i + row_index_offset} (already filled)")
-            continue
-        await row_queue.put(i)
+            # Wait for input processing to finish
+            await row_queue.join()
 
-    # Wait for input processing to finish
-    await row_queue.join()
-
-    # Tell workers and writer to shut down
-    for _ in range(parallel_rows):
-        await row_queue.put(None)
-    await output_queue.put((None, None, 0, 0))
-    await writer_task
+            # Tell workers and writer to shut down
+            for _ in range(parallel_rows):
+                await row_queue.put(None)
+            await output_queue.put((None, None, 0, 0))
+        # TaskGroup ensures all tasks complete or are cancelled when exiting the context
     stats.report_cost()
