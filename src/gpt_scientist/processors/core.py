@@ -110,6 +110,7 @@ async def analyze_data(
     row_queue = asyncio.Queue(2 * parallel_rows)  # Double the size to avoid blocking
     output_queue = asyncio.Queue()
 
+    # Prepare mode-specific setup and create worker coroutines
     if is_similarity:
         # Compute embeddings for the prompts
         tasks = [llm_client.generate_embedding(q) for q in similarity_queries]
@@ -117,36 +118,14 @@ async def analyze_data(
         query_embeddings = [emb for emb, _ in embeddings_and_tokens]
         input_tokens = sum(tokens for _, tokens in embeddings_and_tokens)
         stats.input_tokens += input_tokens
-        # Start workers
-        async with asyncio.TaskGroup() as tg:
-            for _ in range(parallel_rows):
-                tg.create_task(similarity_row_worker(
-                    data, query_embeddings, input_fields[0], output_fields[0],
-                    row_queue, output_queue, llm_client, similarity_mode
-                ))
-            # Start writer
-            tg.create_task(writer(output_queue, write_output_rows, data, stats, row_index_offset))
-
-            # Add rows to be processed by the workers
-            for i in rows:
-                if i < 0 or i >= len(data):
-                    logger.warning(f"Skipping row {i + row_index_offset} (no such row)")
-                    continue
-                row = data.loc[i]
-                if not overwrite and any(row[field] for field in output_fields):
-                    # If any of the output fields is already filled, skip the row
-                    logger.debug(f"Skipping row {i + row_index_offset} (already filled)")
-                    continue
-                await row_queue.put(i)
-
-            # Wait for input processing to finish
-            await row_queue.join()
-
-            # Tell workers and writer to shut down
-            for _ in range(parallel_rows):
-                await row_queue.put(None)
-            await output_queue.put((None, None, 0, 0))
-        # TaskGroup ensures all tasks complete or are cancelled when exiting the context
+        # Create worker coroutines for similarity mode
+        worker_coros = [
+            similarity_row_worker(
+                data, query_embeddings, input_fields[0], output_fields[0],
+                row_queue, output_queue, llm_client, similarity_mode
+            )
+            for _ in range(parallel_rows)
+        ]
     else:
         # Prepare the few-shot examples
         example_messages = []
@@ -159,33 +138,40 @@ async def analyze_data(
             example_messages.extend(create_example_messages(prompt, row, input_fields, output_fields,
                                                             llm_client.use_structured_outputs))
         llm_client.set_examples(example_messages)
-        # Start workers
-        async with asyncio.TaskGroup() as tg:
-            for _ in range(parallel_rows):
-                tg.create_task(analyze_row_worker(
-                    data, prompt, input_fields, output_fields, row_queue, output_queue, llm_client
-                ))
-            # Start writer
-            tg.create_task(writer(output_queue, write_output_rows, data, stats, row_index_offset))
+        # Create worker coroutines for analyze mode
+        worker_coros = [
+            analyze_row_worker(
+                data, prompt, input_fields, output_fields, row_queue, output_queue, llm_client
+            )
+            for _ in range(parallel_rows)
+        ]
 
-            # Add rows to be processed by the workers
-            for i in rows:
-                if i < 0 or i >= len(data):
-                    logger.warning(f"Skipping row {i + row_index_offset} (no such row)")
-                    continue
-                row = data.loc[i]
-                if not overwrite and any(row[field] for field in output_fields):
-                    # If any of the output fields is already filled, skip the row
-                    logger.debug(f"Skipping row {i + row_index_offset} (already filled)")
-                    continue
-                await row_queue.put(i)
+    # Start workers and writer in a task group
+    async with asyncio.TaskGroup() as tg:
+        # Start all workers
+        for worker_coro in worker_coros:
+            tg.create_task(worker_coro)
+        # Start writer
+        tg.create_task(writer(output_queue, write_output_rows, data, stats, row_index_offset))
 
-            # Wait for input processing to finish
-            await row_queue.join()
+        # Add rows to be processed by the workers
+        for i in rows:
+            if i < 0 or i >= len(data):
+                logger.warning(f"Skipping row {i + row_index_offset} (no such row)")
+                continue
+            row = data.loc[i]
+            if not overwrite and any(row[field] for field in output_fields):
+                # If any of the output fields is already filled, skip the row
+                logger.debug(f"Skipping row {i + row_index_offset} (already filled)")
+                continue
+            await row_queue.put(i)
 
-            # Tell workers and writer to shut down
-            for _ in range(parallel_rows):
-                await row_queue.put(None)
-            await output_queue.put((None, None, 0, 0))
-        # TaskGroup ensures all tasks complete or are cancelled when exiting the context
+        # Wait for input processing to finish
+        await row_queue.join()
+
+        # Tell workers and writer to shut down
+        for _ in range(parallel_rows):
+            await row_queue.put(None)
+        await output_queue.put((None, None, 0, 0))
+    # TaskGroup ensures all tasks complete or are cancelled when exiting the context
     stats.report_cost()

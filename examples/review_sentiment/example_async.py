@@ -7,8 +7,8 @@ from dotenv import load_dotenv
 # Load environment variables from .env file (including OPENAI_API_KEY)
 load_dotenv()
 
-# logging.basicConfig(level=logging.WARNING)
-# logging.getLogger("gpt_scientist").setLevel(logging.INFO)
+logging.basicConfig(level=logging.WARNING)
+logging.getLogger("gpt_scientist").setLevel(logging.INFO)
 
 
 async def main():
