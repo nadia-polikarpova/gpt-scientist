@@ -40,6 +40,7 @@ class Scientist:
         self.output_sheet = 'gpt_output'  # Name (prefix) of the worksheet in Google Sheets
         self.max_fuzzy_distance = 30  # Maximum distance for fuzzy search
         self.pricing = fetch_pricing()
+        self.report_interval = self.parallel_rows  # How often to report cost (in number of rows processed)
         self._init_job_stats()  # We don't really need to init this here, but we do this to avoid mypy errors
 
     def _create_llm_client(self) -> LLMClient:
@@ -58,7 +59,7 @@ class Scientist:
 
     def _init_job_stats(self):
         """Initialize JobStats with current model and pricing."""
-        self.stats = JobStats(self.model, self.pricing)
+        self.stats = JobStats(self.model, self.pricing, self.report_interval)
 
     # Configuration setters
     def set_model(self, model: str):
@@ -127,6 +128,10 @@ class Scientist:
         where input_cost and output_cost are the costs per 1M tokens.
         """
         self.pricing = self.pricing | pricing
+
+    def set_report_interval(self, report_interval: int):
+        """Set the interval (in number of rows processed) to report cost. 0 means no reporting."""
+        self.report_interval = report_interval
 
     def set_max_fuzzy_distance(self, max_fuzzy_distance: int):
         """Set the maximum distance for fuzzy search."""

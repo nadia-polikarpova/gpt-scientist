@@ -7,10 +7,11 @@ logger = logging.getLogger(__name__)
 class JobStats:
     '''Statistics for a table processing job.'''
 
-    def __init__(self, model: str, pricing: dict):
+    def __init__(self, model: str, pricing: dict, report_interval: int = 10):
         '''Initialize JobStats with optional pricing information.'''
         self.model = model
         self.pricing = pricing
+        self.report_interval = report_interval
         self.rows_processed = 0
         self.errors = 0
         self.input_tokens = 0
@@ -32,7 +33,7 @@ class JobStats:
         self.rows_processed += rows
         self.input_tokens += input_tokens
         self.output_tokens += output_tokens
-        if self.rows_processed % 10 == 0:
+        if self.report_interval > 0 and self.rows_processed % self.report_interval == 0:
             self.report_cost()
 
     def log_error(self):
