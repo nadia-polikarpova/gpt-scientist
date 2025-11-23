@@ -4,6 +4,7 @@ import os
 from openai import AsyncOpenAI
 from typing import Iterable, Optional
 import logging
+from pandas import DataFrame
 
 from gpt_scientist.config import DEFAULT_MODEL, fetch_pricing
 from gpt_scientist.llm.client import LLMClient
@@ -11,6 +12,7 @@ from gpt_scientist.processors.csv import analyze_csv, check_quotes_csv
 from gpt_scientist.processors.sheets import analyze_google_sheet, check_quotes_google_sheet, get_gdoc_content, IN_COLAB
 from gpt_scientist.utils import run_async
 from gpt_scientist.stats import JobStats
+from gpt_scientist.verification.quotes import check_quotes
 
 logger = logging.getLogger(__name__)
 
@@ -224,6 +226,18 @@ class Scientist:
             rows, examples, overwrite, worksheet_index
         ))
 
+    def check_quotes(
+        self,
+        data: DataFrame,
+        output_field: str,
+        input_fields: list[str] = [],
+        rows: Iterable[int] | None = None
+    ):
+        """Check quotes in a DataFrame."""
+        if rows is None:
+            rows = range(len(data))
+        check_quotes(data, output_field, input_fields, rows, self.max_fuzzy_distance)
+
     # Quote verification methods
     async def check_quotes_csv_async(
         self,
@@ -233,7 +247,7 @@ class Scientist:
         rows: Iterable[int] | None = None
     ):
         """Check quotes in a CSV file. Async version."""
-        return await check_quotes_csv(path, output_field, input_fields, rows, self.max_fuzzy_distance)
+        await check_quotes_csv(path, output_field, input_fields, rows, self.max_fuzzy_distance)
 
     def check_quotes_csv(
         self,
@@ -243,7 +257,7 @@ class Scientist:
         rows: Iterable[int] | None = None
     ):
         """Check quotes in a CSV file. Sync wrapper."""
-        return run_async(self.check_quotes_csv_async(path, output_field, input_fields, rows))
+        run_async(self.check_quotes_csv_async(path, output_field, input_fields, rows))
 
     async def check_quotes_google_sheet_async(
         self,
@@ -254,7 +268,7 @@ class Scientist:
         worksheet_index: int = 0
     ):
         """Check quotes in a Google Sheet. Async version."""
-        return await check_quotes_google_sheet(
+        await check_quotes_google_sheet(
             sheet_key, output_field, input_fields, rows, worksheet_index, self.max_fuzzy_distance
         )
 
@@ -267,6 +281,6 @@ class Scientist:
         worksheet_index: int = 0
     ):
         """Check quotes in a Google Sheet. Sync wrapper."""
-        return run_async(self.check_quotes_google_sheet_async(
+        run_async(self.check_quotes_google_sheet_async(
             sheet_key, output_field, input_fields, rows, worksheet_index
         ))
