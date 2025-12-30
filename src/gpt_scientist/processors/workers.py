@@ -87,6 +87,8 @@ async def analyze_row_worker(
         try:
             row = data.loc[i]
             full_prompt = create_prompt(prompt, input_fields, output_fields, row, llm_client.use_structured_outputs)
+            if i == 0:
+                logger.info(f"Example prompt (first row):\n{full_prompt}")
             response, input_tokens, output_tokens = await llm_client.get_response(full_prompt, output_fields)
             await output_queue.put((i, response, input_tokens, output_tokens))
         except Exception as e:
