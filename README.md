@@ -145,26 +145,20 @@ sc.set_parallel_rows(10)
 
 The default is 100.
 
-**Limit the maximum length of model responses**
+**Set model parameters**
 
 ```python
-sc.set_max_tokens(100)
+sc.set_model_params({
+    'top_p': 0.5,
+    'max_completion_tokens': 100
+})
 ```
 
-This protects you from excessive costs if the model starts generating very long outputs.
-However, if you need longer answers, setting this too low may cut them off.
-By default, the response length is unlimited.
-
-**Control response diversity**
-
-```python
-sc.set_top_p(0.5)
-```
-
-- Lower values (e.g., 0.1) make the model's responses more deterministic.
-- Higher values (e.g., 1.0) make them more varied (and possibly less coherent).
-
-The default is 0.3, balancing predictability and creativity.
+Pass any parameters supported by the OpenAI API. Common options:
+- `top_p`: Controls diversity via nucleus sampling (0.0-1.0). Lower values make responses more deterministic.
+- `max_completion_tokens`: Limits response length. Protects from excessive costs if the model generates very long outputs.
+- `temperature`: Controls randomness (0.0-2.0).
+- `reasoning_effort`: For reasoning models ('none', 'low', 'medium', 'high').
 
 **Adjust retries and batch sizes**
 

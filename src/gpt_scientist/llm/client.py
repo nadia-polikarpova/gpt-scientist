@@ -3,7 +3,6 @@
 import json
 import logging
 from typing import Optional
-from openai import NOT_GIVEN, NotGiven
 from pydantic import create_model
 
 logger = logging.getLogger(__name__)
@@ -13,24 +12,16 @@ class LLMClient:
     """Wrapper for OpenAI async client with response parsing."""
 
     def __init__(self, async_client, model: str, system_prompt: str, use_structured_outputs: bool,
-                 num_results: int, num_retries: int, max_tokens: Optional[int], top_p: float, pricing: dict):
+                 num_results: int, num_retries: int, model_params: dict, pricing: dict):
         self._client = async_client
         self.model = model
         self.system_prompt = system_prompt
         self.use_structured_outputs = use_structured_outputs
         self.num_results = num_results
         self.num_retries = num_retries
-        self.max_tokens = max_tokens
-        self.top_p = top_p
+        self.model_params = model_params
         self.pricing = pricing
         self.examples = []
-
-    def get_top_p(self) -> float | NotGiven:
-        """Get the top p parameter if supported by the current model, otherwise return NOT_GIVEN."""
-        if self.model in self.pricing and 'top_p' in self.pricing[self.model]:
-            if not self.pricing[self.model]['top_p']:
-                return NOT_GIVEN
-        return self.top_p
 
     def set_examples(self, examples: list[dict]):
         """Set few-shot examples for the model."""
@@ -51,9 +42,8 @@ class LLMClient:
             model=self.model,
             messages=messages,
             n=self.num_results,
-            max_completion_tokens=self.max_tokens,
             response_format=response_format,
-            top_p=self.get_top_p(),
+            **self.model_params,
         )
 
     def parse_response(self, completion, output_fields: list[str]) -> Optional[dict]:

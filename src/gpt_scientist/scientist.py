@@ -35,8 +35,7 @@ class Scientist:
         self.system_prompt = 'You are a social scientist analyzing textual data.'
         self.num_results = 1  # How many completions to generate at once?
         self.num_retries = 10  # How many times to retry if no valid completion?
-        self.max_tokens = None  # Maximum number of tokens to generate
-        self.top_p = 0.3  # Top p parameter for nucleus sampling
+        self.model_params = {}  # Additional parameters passed directly to OpenAI API
         self.similarity_mode = 'max'  # Similarity mode: 'max' (default) or 'mean'
         self.parallel_rows = 100  # How many rows to process in parallel?
         self.output_sheet = 'gpt_output'  # Name (prefix) of the worksheet in Google Sheets
@@ -54,8 +53,7 @@ class Scientist:
             self.use_structured_outputs,
             self.num_results,
             self.num_retries,
-            self.max_tokens,
-            self.top_p,
+            self.model_params,
             self.pricing
         )
 
@@ -100,9 +98,12 @@ class Scientist:
         """Load the system prompt from a Google Doc. Sync wrapper."""
         return run_async(self.load_system_prompt_from_google_doc_async(doc_id))
 
-    def set_max_tokens(self, max_tokens: int):
-        """Set the maximum number of tokens to generate."""
-        self.max_tokens = max_tokens
+    def set_model_params(self, model_params: dict):
+        """
+        Set parameters to pass directly to the OpenAI API.
+        Example: sc.set_model_params({'top_p': 0.5, 'max_completion_tokens': 100})
+        """
+        self.model_params = model_params
 
     def set_similarity_mode(self, similarity_mode: str):
         """Set the similarity mode: 'max' (default) or 'mean'."""
@@ -110,10 +111,6 @@ class Scientist:
             logger.error("Invalid similarity mode. Must be 'max' or 'mean'.")
             return
         self.similarity_mode = similarity_mode
-
-    def set_top_p(self, top_p: float):
-        """Set the top p parameter for nucleus sampling."""
-        self.top_p = top_p
 
     def set_parallel_rows(self, parallel_rows: int):
         """Set the number of rows to process in parallel."""
