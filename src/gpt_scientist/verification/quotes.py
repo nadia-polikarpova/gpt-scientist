@@ -55,10 +55,6 @@ def fuzzy_find_in_text(quote: str, text: str, max_distance: int) -> tuple[str, i
     Find a quote in text using fuzzy matching.
     Returns (matched_text, distance) or None if not found.
     """
-    # Clean the text and quote by collapsing multiple spaces and normalizing newlines
-    text = re.sub(r'\s+', ' ', text)
-    quote = re.sub(r'\s+', ' ', quote)
-
     # First check if the quote is an exact match, ignoring case
     # (because this is common and faster)
     exact_match = re.search(re.escape(quote), text, re.IGNORECASE)
