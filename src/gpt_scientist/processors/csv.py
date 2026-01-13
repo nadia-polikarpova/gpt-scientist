@@ -57,7 +57,7 @@ async def check_quotes_csv(
     output_field: str,
     input_fields: list[str] = [],
     rows: Optional[Iterable[int]] = None,
-    max_fuzzy_distance: int = 30
+    fuzzy_threshold: float = 0.25
 ):
     """Check quotes in a CSV file. Async version."""
     # Read CSV asynchronously
@@ -66,7 +66,7 @@ async def check_quotes_csv(
         rows = range(len(data))
 
     # Perform quote checks (CPU-bound, but quick enough to not need threading)
-    check_quotes(data, output_field, input_fields, rows, max_fuzzy_distance)
+    check_quotes(data, output_field, input_fields, rows, fuzzy_threshold)
 
     # Save the results asynchronously
     await asyncio.to_thread(data.to_csv, path, index=False)

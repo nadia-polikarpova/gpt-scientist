@@ -1,5 +1,6 @@
 """Core quote verification functionality."""
 
+import ast
 import logging
 import re
 import pandas as pd
@@ -25,7 +26,18 @@ def extract_quotes(text: str) -> list[str]:
     """
     If text contains only properly quoted strings separated by whitespace,
     extract all substrings between the quotes. Otherwise, return the whole text.
+    Also handles Python list syntax like ['quote1', 'quote2'].
     """
+    # First, try to parse as a Python list
+    stripped = text.strip()
+    if stripped.startswith('[') and stripped.endswith(']'):
+        try:
+            parsed = ast.literal_eval(stripped)
+            if isinstance(parsed, list) and all(isinstance(item, str) for item in parsed):
+                return parsed
+        except (ValueError, SyntaxError):
+            pass  # Not a valid Python list, fall through to other patterns
+
     # Build patterns that disallow closing quotes within the quoted string
     quoted_patterns = []
     for opening, closing in QUOTE_PAIRS.items():
@@ -50,10 +62,13 @@ def extract_quotes(text: str) -> list[str]:
     return all_matches
 
 
-def fuzzy_find_in_text(quote: str, text: str, max_distance: int) -> tuple[str, int] | None:
+def fuzzy_find_in_text(quote: str, text: str, fuzzy_threshold: float) -> tuple[str, int] | None:
     """
     Find a quote in text using fuzzy matching.
     Returns (matched_text, distance) or None if not found.
+
+    fuzzy_threshold: Maximum allowed edit distance as a fraction of quote length (0-1).
+                     E.g., 0.25 means up to 25% of characters can differ.
     """
     # First check if the quote is an exact match, ignoring case
     # (because this is common and faster)
@@ -62,7 +77,8 @@ def fuzzy_find_in_text(quote: str, text: str, max_distance: int) -> tuple[str, i
         return (exact_match.group(), 0)
 
     # Otherwise, use fuzzy search to find the closest
-    matches = find_near_matches(quote, text, max_l_dist=min(len(quote)//4, max_distance))
+    max_distance = int(len(quote) * fuzzy_threshold)
+    matches = find_near_matches(quote, text, max_l_dist=max_distance)
     if not matches:
         return None
     else:
@@ -81,13 +97,15 @@ def check_quotes(
     output_field: str,
     input_fields: list[str],
     rows: Iterable[int],
-    max_fuzzy_distance: int
+    fuzzy_threshold: float
 ):
     """
     For each row in the rows range, check that the quotes from the output field actually exist in one of the input fields.
     We assume that the values in output_field are strings that contain quotes in quotes,
     and the values in all input fields are strings.
     Record the results in a new column called {output_field}_verified.
+
+    fuzzy_threshold: Maximum allowed edit distance as a fraction of quote length (0-1).
     """
     verified_field = verified_field_name(output_field)
     if not (verified_field in data.columns):
@@ -98,7 +116,7 @@ def check_quotes(
         input_text = '\n\n'.join(data.loc[row, input_fields])
         verified = output
         for quote in quotes:
-            matched = fuzzy_find_in_text(quote, input_text, max_fuzzy_distance)
+            matched = fuzzy_find_in_text(quote, input_text, fuzzy_threshold)
 
             if matched:
                 (res, dist) = matched

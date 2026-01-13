@@ -235,7 +235,7 @@ async def check_quotes_google_sheet(
     input_fields: list[str] = [],
     rows: str = ':',
     worksheet_index: int = 0,
-    max_fuzzy_distance: int = 30
+    fuzzy_threshold: float = 0.25
 ):
     """Check quotes in a Google Sheet. Async version."""
     if not IN_COLAB:
@@ -274,7 +274,7 @@ async def check_quotes_google_sheet(
     verified_column_name, verified_column_index = await asyncio.to_thread(_prepare_verified_column)
 
     # Perform quote checks (this is CPU-bound, not I/O)
-    check_quotes(data, output_field, input_fields, rows_to_check, max_fuzzy_distance)
+    check_quotes(data, output_field, input_fields, rows_to_check, fuzzy_threshold)
 
     # Write results back to sheet
     def _write_verified_column():

@@ -39,7 +39,7 @@ class Scientist:
         self.similarity_mode = 'max'  # Similarity mode: 'max' (default) or 'mean'
         self.parallel_rows = 100  # How many rows to process in parallel?
         self.output_sheet = 'gpt_output'  # Name (prefix) of the worksheet in Google Sheets
-        self.max_fuzzy_distance = 30  # Maximum distance for fuzzy search
+        self.fuzzy_threshold = 0.25  # Maximum edit distance as fraction of quote length (0-1)
         self.pricing = fetch_pricing()
         self.report_interval = self.parallel_rows  # How often to report cost (in number of rows processed)
         self._init_job_stats()  # We don't really need to init this here, but we do this to avoid mypy errors
@@ -132,9 +132,9 @@ class Scientist:
         """Set the interval (in number of rows processed) to report cost. 0 means no reporting."""
         self.report_interval = report_interval
 
-    def set_max_fuzzy_distance(self, max_fuzzy_distance: int):
-        """Set the maximum distance for fuzzy search."""
-        self.max_fuzzy_distance = max_fuzzy_distance
+    def set_fuzzy_threshold(self, fuzzy_threshold: float):
+        """Set the maximum edit distance as a fraction of quote length (0-1)."""
+        self.fuzzy_threshold = fuzzy_threshold
 
     # CSV processing methods
     async def analyze_csv_async(
@@ -233,7 +233,7 @@ class Scientist:
         """Check quotes in a DataFrame."""
         if rows is None:
             rows = range(len(data))
-        check_quotes(data, output_field, input_fields, rows, self.max_fuzzy_distance)
+        check_quotes(data, output_field, input_fields, rows, self.fuzzy_threshold)
 
     # Quote verification methods
     async def check_quotes_csv_async(
@@ -244,7 +244,7 @@ class Scientist:
         rows: Iterable[int] | None = None
     ):
         """Check quotes in a CSV file. Async version."""
-        await check_quotes_csv(path, output_field, input_fields, rows, self.max_fuzzy_distance)
+        await check_quotes_csv(path, output_field, input_fields, rows, self.fuzzy_threshold)
 
     def check_quotes_csv(
         self,
@@ -266,7 +266,7 @@ class Scientist:
     ):
         """Check quotes in a Google Sheet. Async version."""
         await check_quotes_google_sheet(
-            sheet_key, output_field, input_fields, rows, worksheet_index, self.max_fuzzy_distance
+            sheet_key, output_field, input_fields, rows, worksheet_index, self.fuzzy_threshold
         )
 
     def check_quotes_google_sheet(
